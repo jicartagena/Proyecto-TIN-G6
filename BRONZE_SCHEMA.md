@@ -27,7 +27,11 @@ Este documento describe el esquema, estructura, trazabilidad y anomalías observ
 - **Esquema de columnas:**
   | Columna | Tipo de dato en Bronze | Significado / Descripción |
   |---|---|---|
-  | `mes` | Texto (`object`) | Mes de procesamiento o extracción del lote. |
+  | `lote_id` | Texto (`object`) | Identificador original del lote. |
+  | `fecha` | Texto (`object`) | Fecha operacional original, sin interpretar. |
+  | `planta_id` | Texto (`object`) | Identificador de planta asociado al lote. |
+  | `rajo_id` | Texto (`object`) | Identificador de rajo asociado al lote. |
+  | `mes` | Texto (`object`) | Mes original, conservado para conciliación. |
   | `toneladas_tratadas` | Texto (`object`) | Tonelaje procesado del lote mineral. |
   | `ley_pct` | Texto (`object`) | Ley de cobre del lote en porcentaje (%Cu). |
   | `recuperacion_pct` | Texto (`object`) | Recuperación metalúrgica del lote en porcentaje (%). |
@@ -38,6 +42,7 @@ Este documento describe el esquema, estructura, trazabilidad y anomalías observ
   - Formatos numéricos heterogéneos: convivencia de punto y coma como separador decimal (ej. `'0.646'` junto a `'0,85'`; `'90,5'` junto a `'85.9'`).
   - Formatos de miles con puntos en tonelaje (ej. `'2.834'` y `'3.191'` junto a valores enteros directos como `'2962'`).
   - Formato de mes heterogéneo a nivel operacional (ej. `'12'`, `'8'`, `'3'`).
+  - Cuatro formatos de fecha: `YYYY-MM-DD`, `DD/MM/YYYY`, `DD-MM-YY` y abreviaturas de meses en español.
 
 ---
 
@@ -54,6 +59,7 @@ Este documento describe el esquema, estructura, trazabilidad y anomalías observ
 - **Esquema de columnas:**
   | Columna | Tipo de dato en Bronze | Significado / Descripción |
   |---|---|---|
+  | `planta` | Texto (`object`) | Nombre original de la planta, incluidos sus alias. |
   | `mes` | Texto (`object`) | Período de costo (formato esperado `YYYY-MM` o cabecera). |
   | `energia_clp` | Texto (`object`) | Costo de energía en pesos chilenos (CLP). |
   | `insumos_clp` | Texto (`object`) | Costo de insumos en pesos chilenos (CLP). |
@@ -77,6 +83,11 @@ Este documento describe el esquema, estructura, trazabilidad y anomalías observ
 - **Esquema de columnas:**
   | Columna | Tipo de dato en Bronze | Significado / Descripción |
   |---|---|---|
+  | `lote_id` | Texto (`object`) | Identificador usado para vincular laboratorio con lotes. |
+  | `laboratorio` | Texto (`object`) | Laboratorio reportante. |
+  | `fecha_muestreo` | Texto (`object`) | Fecha original de muestreo. |
+  | `ley_lab_prom` | Texto (`object`) | Ley promedio reportada, sin recalcular. |
+  | `muestras_json` | Texto (`object`) | Lista de muestras anidadas serializada como JSON. |
   | `record_content` | Texto (`object`) | Contenido JSON serializado completo de cada registro del arreglo `registros`. |
   | `source_file` | Texto (`object`) | Trazabilidad: archivo de origen (`origen_leyes_laboratorio.json`). |
   | `source_row_index` | Texto (`object`) | Trazabilidad: índice ordinal del registro dentro de la lista (1-indexed). |
@@ -84,8 +95,8 @@ Este documento describe el esquema, estructura, trazabilidad y anomalías observ
 - **Documentación de la decisión de estructura:**
   - El archivo JSON contiene metadatos a nivel raíz (`faena`, `unidad_ley`, `reporta`) y una lista `registros`.
   - Cada elemento de `registros` incluye campos escalares (`lote_id`, `laboratorio`, `fecha_muestreo`, `ley_lab_prom`) y una lista anidada de sub-registros: `'muestras'` (ej. `[{"m": 1, "ley": "0,45"}, {"m": 2, "ley": "0,42"}, ...]`).
-  - Debido a que la estructura contiene listas con cantidades variables de muestras por lote y valores anidados heterogéneos, no es posible aplanarla en una tabla plana relacional sin adoptar supuestos de desanidado o duplicación de granularidad.
-  - Conforme al requerimiento y las reglas de negocio (donde los datos de laboratorio no se emplean para las métricas analíticas pero deben ingresar al pipeline por pauta), **cada registro se conserva íntegro en texto en la columna `record_content`**.
+  - Debido a que la estructura contiene listas con cantidades variables, las muestras permanecen serializadas; no se duplica la granularidad del análisis.
+  - Cada registro se conserva íntegro en `record_content`, y los campos escalares se exponen para que Silver pueda normalizarlos y reproducir la sensibilidad sin alterar el valor reportado.
 
 ---
 

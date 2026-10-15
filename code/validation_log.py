@@ -32,6 +32,16 @@ from config import VALIDATION_LOG_PATH
 _failures: list[dict] = []
 
 
+def reset() -> None:
+    """Vacia el acumulador para iniciar una corrida independiente."""
+    _failures.clear()
+
+
+def get_failures() -> list[dict]:
+    """Retorna una copia de las fallas acumuladas (util para pruebas)."""
+    return list(_failures)
+
+
 def register_failure(
     stage: str,
     dataset: str,

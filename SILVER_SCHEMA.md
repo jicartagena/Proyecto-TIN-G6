@@ -11,9 +11,8 @@ de limpieza (`code/cleaning.py`) en la carpeta `silver/`.
   No quedan simbolos de moneda, separadores de miles, comas decimales ni sufijos ",00".
 - **Sin metricas derivadas:** no hay columnas calculadas, agregaciones ni conversiones
   de moneda. Silver es la entrada de la etapa de metricas; no anticipa ninguna logica de esa etapa.
-- **Sin identificacion de plantas:** las filas de costos de diferentes plantas permanecen
-  como filas separadas; la planta no se registra en silver (decision de diseno documentada
-  en ARCHITECTURE.md, decision 11).
+- **Granularidad de origen conservada:** las filas de costos permanecen a nivel planta-mes;
+  los lotes conservan sus identificadores de planta y rajo. No se crean dimensiones fisicas nuevas.
 - **Trazabilidad conservada:** cada fila mantiene `source_file` y `source_row_index`
   heredados de bronze para poder rastrear cualquier valor hasta su origen en `raw/`.
 - **Fallas visibles:** los valores que no pudieron transformarse quedan como `NaN`/`None`
@@ -25,7 +24,8 @@ de limpieza (`code/cleaning.py`) en la carpeta `silver/`.
 
 | Concepto        | Formato canonico | Ejemplo        | Notas                                      |
 |-----------------|------------------|----------------|--------------------------------------------|
-| Mes             | `YYYY-MM` string | `"2025-06"`    | Anio siempre = 2025 (ANALYSIS_YEAR)        |
+| Mes operacional | `YYYY-MM` string | `"2025-06"`    | Derivado de la fecha normalizada del lote   |
+| Fecha operacional | `YYYY-MM-DD` string | `"2025-06-09"` | Soporta los cuatro formatos observados   |
 | Fecha diaria    | `YYYY-MM-DD` string | `"2025-06-30"` | Derivado de ISO 8601 UTC de la API      |
 | Monto en CLP    | `float64`        | `12652294704.0`| Sin "$", sin puntos de miles, sin coma     |
 | Porcentaje      | `float64`        | `0.646`, `90.5`| En unidades de porcentaje (no fraccion)    |
@@ -44,6 +44,8 @@ de limpieza (`code/cleaning.py`) en la carpeta `silver/`.
 
 | Columna            | Tipo     | Significado                                                              |
 |--------------------|----------|--------------------------------------------------------------------------|
+| `planta_original`  | string   | Nombre tal como aparece en el CSV.                                      |
+| `planta`           | string   | Nombre canonico de una de las cuatro plantas esperadas.                 |
 | `mes`              | string   | Periodo de costo en formato canonico `YYYY-MM`.                         |
 | `energia_clp`      | float64  | Costo de energia electrica en pesos chilenos (CLP).                     |
 | `insumos_clp`      | float64  | Costo de insumos en CLP. Puede ser NaN si el valor original era `N/A`.  |
@@ -52,8 +54,8 @@ de limpieza (`code/cleaning.py`) en la carpeta `silver/`.
 | `source_row_index` | string   | Numero de linea original en el CSV de origen (1-indexed, trazabilidad). |
 
 **Notas:**
-- Cada fila corresponde a una planta para un mes dado. Las plantas no se identifican
-  (la columna `planta` no existia en bronze porque no fue extraida; decision de diseno).
+- Cada fila corresponde a una planta para un mes dado. Esta columna permite comprobar
+  que esten Cerro Norte, Loa, Salado e Illapel antes de consolidar a nivel empresa.
 - El valor `N/A` de `insumos_clp` para una planta en junio 2025 queda como `NaN`.
   Se registra una alerta en `validation_log.parquet` con `rule = IMPUTE_MISSING_COST=False`.
 
@@ -66,18 +68,47 @@ de limpieza (`code/cleaning.py`) en la carpeta `silver/`.
 
 | Columna              | Tipo     | Significado                                                                |
 |----------------------|----------|----------------------------------------------------------------------------|
-| `mes`                | string   | Mes de extraccion en formato canonico `YYYY-MM`. Derivado del entero de mes de la fuente SQLite. |
+| `lote_id`            | Int64    | Identificador original; puede repetirse y no se elimina.                   |
+| `fecha_original`     | string   | Fecha tal como aparece en SQLite.                                           |
+| `fecha`              | string   | Fecha operacional normalizada `YYYY-MM-DD`.                                |
+| `planta_id`          | Int64    | Planta asociada al lote.                                                    |
+| `rajo_id`            | Int64    | Rajo asociado al lote.                                                      |
+| `mes_original`       | string   | Campo mes original, conservado sólo para auditoria.                         |
+| `mes`                | string   | Mes `YYYY-MM` derivado de `fecha`, usado por Gold.                          |
 | `toneladas_tratadas` | float64  | Tonelaje del lote procesado (toneladas metricas). No negativo.            |
 | `ley_pct`            | float64  | Ley de cobre del lote en porcentaje (%Cu). Rango plausible: 0-5 %.       |
 | `recuperacion_pct`   | float64  | Recuperacion metalurgica en porcentaje (%). Rango plausible: 50-100 %.   |
+| `es_elegible`        | bool     | Cumple fecha 2025 y las tres reglas de calidad acordadas.                  |
+| `motivo_exclusion`   | string   | Causas de exclusión separadas por `|`; vacío si es elegible.               |
 | `source_file`        | string   | Archivo de origen en `raw/` (trazabilidad).                               |
 | `source_row_index`   | string   | Posicion ordinal del registro en la tabla `lotes` de SQLite (trazabilidad).|
 
 **Notas:**
 - Los porcentajes se expresan en unidades de porcentaje (ej. `0.646` es 0.646 %Cu),
   no como fraccion (no se divide por 100). La etapa de metricas divide por 100 al calcular.
-- El anio del campo `mes` se fija en `ANALYSIS_YEAR` (2025) porque la fuente SQLite
-  solo almacena el numero de mes sin anio.
+- La fecha normalizada es la fuente temporal oficial. Las discrepancias con
+  `mes_original` se registran, pero no cambian la fecha ni se corrigen automaticamente.
+- Silver conserva 14.598 filas: 14.240 elegibles y 358 excluidas. Incluye los 86
+  registros fechados en 2026 y los 144 `lote_id` repetidos para auditoria.
+
+---
+
+### silver_laboratorio.parquet
+
+**Origen:** `bronze/bronze_leyes_laboratorio.parquet`
+**Filas esperadas:** 879
+
+| Columna | Tipo | Significado |
+|---------|------|-------------|
+| `lote_id` | Int64 | Clave de vinculacion con los lotes. |
+| `laboratorio` | string | Laboratorio reportante. |
+| `fecha_muestreo_original` | string | Fecha original. |
+| `fecha_muestreo` | string | Fecha normalizada `YYYY-MM-DD`. |
+| `ley_lab_prom_original` | string | Valor reportado original. |
+| `ley_lab_prom` | float64 | El mismo valor normalizado; no se reemplaza por el promedio de muestras. |
+| `muestras_json` | string | Muestras con leyes numericas normalizadas. |
+| `cantidad_muestras` | Int64 | Cantidad de muestras informadas. |
+| `source_file`, `source_row_index` | string | Trazabilidad al JSON original. |
 
 ---
 
@@ -94,9 +125,8 @@ de limpieza (`code/cleaning.py`) en la carpeta `silver/`.
 | `source_row_index` | string   | Posicion ordinal en la serie historica (1-indexed, trazabilidad).       |
 
 **Notas:**
-- La serie cubre solo dias habiles bursatiles; no hay cotizacion los fines de semana
-  ni feriados. Esto puede implicar que el ultimo dia calendario de algun mes no tenga
-  cotizacion (ver alertas en `validation_log.parquet`, regla REGLA 4).
+- La serie cubre solo dias habiles bursatiles; Gold selecciona la fecha mas reciente
+  realmente disponible de cada mes.
 - La serie viene ordenada de mas reciente a mas antigua (como la entrega la API).
 
 ---
@@ -124,10 +154,9 @@ de limpieza (`code/cleaning.py`) en la carpeta `silver/`.
 
 | Dataset                   | Razon                                                                      |
 |---------------------------|----------------------------------------------------------------------------|
-| `bronze_leyes_laboratorio`| Decision de diseno documentada: los datos de laboratorio no se usan en el analisis (ARCHITECTURE.md, decision 14). Permanece en bronze. |
 | Metricas derivadas        | Cobre fino, cash cost, ingresos, costos en USD: se calculan en la etapa de metricas desde silver. |
 | Dimension de tiempo       | Eliminada del modelo dimensional (ARCHITECTURE.md, decision 11).           |
-| Dimension de planta       | Eliminada del modelo dimensional (ARCHITECTURE.md, decision 11).           |
+| Dimension fisica de planta| No se crea una tabla dimensional; la planta queda como atributo del dato de origen. |
 
 ---
 

@@ -47,6 +47,7 @@ def main() -> None:
     el usuario sepa qué está ocurriendo. Captura errores técnicos inesperados
     para mostrar un mensaje legible antes de abortar.
     """
+    validation_log.reset()
     print("=" * 60)
     print("  Pipeline CuprumAndes — inicio")
     print("=" * 60)

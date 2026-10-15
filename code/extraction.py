@@ -72,10 +72,10 @@ def extract_lotes(db_path: Path, output_path: Path) -> int:
     """
     Extrae la tabla 'lotes' de la base SQLite origen_mina.sqlite hacia bronze.
 
-    Lee únicamente las columnas solicitadas ('mes', 'toneladas_tratadas', 'ley_pct',
-    'recuperacion_pct') y preserva cada valor exactamente como texto sin inferencia
-    de tipos ni conversiones. Además, agrega las columnas de trazabilidad 'source_file'
-    y 'source_row_index' (representando la posición ordinal 1-indexed del registro en la tabla).
+    Lee las columnas necesarias para auditar fecha, lote, planta, rajo y producción,
+    y preserva cada valor exactamente como texto sin inferencia de tipos ni
+    conversiones. Además, agrega las columnas de trazabilidad 'source_file' y
+    'source_row_index' (representando la posición ordinal 1-indexed del registro en la tabla).
 
     Parameters
     ----------
@@ -89,7 +89,10 @@ def extract_lotes(db_path: Path, output_path: Path) -> int:
     int
         Número de filas extraídas.
     """
-    columns = ["mes", "toneladas_tratadas", "ley_pct", "recuperacion_pct"]
+    columns = [
+        "lote_id", "fecha", "planta_id", "rajo_id", "mes",
+        "toneladas_tratadas", "ley_pct", "recuperacion_pct",
+    ]
     conn = sqlite3.connect(db_path)
     try:
         # Extraer usando SELECT preservando el orden natural de la base de datos
@@ -117,7 +120,7 @@ def extract_costos(csv_path: Path, output_path: Path) -> int:
     Extrae las columnas solicitadas del archivo origen_costos_planta.csv hacia bronze.
 
     Lee las líneas del archivo CSV delimitado por punto y coma, extrayendo las columnas
-    'mes', 'energia_clp', 'insumos_clp' y 'mano_obra_clp'. Preserva los valores en crudo
+    'planta', 'mes', 'energia_clp', 'insumos_clp' y 'mano_obra_clp'. Preserva los valores en crudo
     (incluyendo headers repetidos y filas de resumen como 'TOTAL' si existen en los datos)
     sin recortar espacios ni alterar tipos. Agrega la trazabilidad 'source_file' y
     'source_row_index' (número de línea 1-indexed en el archivo original).
@@ -134,7 +137,7 @@ def extract_costos(csv_path: Path, output_path: Path) -> int:
     int
         Número de filas de datos extraídas (excluyendo únicamente la fila 1 de cabecera inicial).
     """
-    target_cols = ["mes", "energia_clp", "insumos_clp", "mano_obra_clp"]
+    target_cols = ["planta", "mes", "energia_clp", "insumos_clp", "mano_obra_clp"]
 
     with open(csv_path, "r", encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
@@ -173,11 +176,9 @@ def extract_leyes_laboratorio(json_path: Path, output_path: Path) -> int:
     """
     Extrae el archivo de leyes de laboratorio origen_leyes_laboratorio.json hacia bronze.
 
-    Dado que los registros contienen estructuras anidadas ('muestras' como lista de diccionarios),
-    no pueden aplanarse trivialmente en una tabla regular sin pérdida de granularidad o supuestos.
-    Por ello, cada registro de la lista 'registros' se conserva como texto íntegro en una columna
-    'record_content' (formato JSON como string), permitiendo trazabilidad y cumpliendo con el
-    requerimiento de documentar dicha decisión. Se añade la columna 'source_file' y
+    Cada registro conserva su contenido íntegro en 'record_content' y expone además
+    los campos necesarios para normalizarlo en silver: lote_id, laboratorio,
+    fecha_muestreo, ley_lab_prom y muestras_json. Se añade 'source_file' y
     'source_row_index' (posición 1-indexed de cada registro dentro del arreglo).
 
     Parameters
@@ -199,6 +200,11 @@ def extract_leyes_laboratorio(json_path: Path, output_path: Path) -> int:
     records = []
     for idx, reg in enumerate(registros, start=1):
         records.append({
+            "lote_id": str(reg.get("lote_id", "")),
+            "laboratorio": str(reg.get("laboratorio", "")),
+            "fecha_muestreo": str(reg.get("fecha_muestreo", "")),
+            "ley_lab_prom": str(reg.get("ley_lab_prom", "")),
+            "muestras_json": json.dumps(reg.get("muestras", []), ensure_ascii=False),
             "record_content": json.dumps(reg, ensure_ascii=False),
             "source_file": json_path.name,
             "source_row_index": str(idx),

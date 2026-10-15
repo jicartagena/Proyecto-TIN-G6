@@ -13,7 +13,7 @@ El objetivo analítico central del proyecto es responder una pregunta estratégi
 Para resolver esta interrogante, el pipeline integra cuatro fuentes de datos dispersas:
 1. Base operacional SQLite (`origen_mina.sqlite`), que contiene los lotes de producción diaria de mineral.
 2. Archivo CSV de costos de planta (`origen_costos_planta.csv`), que desglosa los costos operacionales mensuales en energía, insumos y mano de obra.
-3. Archivo JSON de leyes de laboratorio (`origen_leyes_laboratorio.json`), que ingresa al proceso para dar cumplimiento al requerimiento de ingesta de las cuatro fuentes.
+3. Archivo JSON de leyes de laboratorio (`origen_leyes_laboratorio.json`), utilizado además para reproducir la sensibilidad de calibración de ley.
 4. API pública de indicadores económicos (`mindicador.cl`), que provee la serie diaria del precio internacional del cobre (USD/lb) y del tipo de cambio dólar observado (USD/CLP).
 
 El pipeline procesa estas fuentes a través de una arquitectura Medallion (`raw` → `bronze` → `silver` → `gold`), generando una tabla final consolidada a nivel empresa y frecuencia mensual (`gold/gold_metricas.parquet`) que permite comparar la evolución mensual del cash cost frente al precio internacional y determinar con evidencia cuantitativa los causantes del desempeño económico del año.
@@ -116,11 +116,15 @@ Proyecto-TIN-G6/
 ├── silver/                    # Capa Silver: datos limpios, validados y tipados en Parquet
 │   ├── silver_lotes.parquet
 │   ├── silver_costos.parquet
+│   ├── silver_laboratorio.parquet
 │   ├── silver_precio_cobre.parquet
 │   └── silver_tipo_cambio.parquet
 │
 ├── gold/                      # Capa Gold: tabla analítica agregada mensual a nivel empresa
-│   └── gold_metricas.parquet
+│   ├── gold_metricas.parquet
+│   ├── gold_sensibilidad_laboratorio.parquet
+│   ├── gold_sensibilidad_lotes_repetidos.parquet
+│   └── revision_lotes_2026_laboratorio.parquet
 │
 └── code/                      # Módulos de lógica del pipeline
     ├── config.py              # Rutas a directorios y constantes analíticas compartidas
@@ -140,7 +144,7 @@ Proyecto-TIN-G6/
   1. Si no existen en `raw/`, consulta las URLs de la API de `mindicador.cl` para precio del cobre y dólar, y almacena las respuestas JSON crudas en `raw/`. Si ya existen, las reutiliza sin usar la red.
   2. Lee las columnas relevantes de cada fuente en `raw/`.
   3. Asigna a cada registro atributos de trazabilidad de auditoría: `source_file` (nombre del archivo origen) y `source_row_index` (número de línea o posición ordinal 1-indexed original).
-  4. Extrae las leyes de laboratorio preservando la estructura JSON como texto plano en una columna `record_content` (por diseño del equipo, entra al proceso pero no pasa a capas posteriores).
+  4. Extrae las leyes de laboratorio preservando `record_content` y exponiendo los campos necesarios para su normalización posterior.
   5. Almacena todos los valores como texto plano (`dtype object/string`) sin inferir tipos ni modificar valores para evitar pérdida de información previa a la limpieza.
 - **Qué lee:**
   - `https://mindicador.cl/api/libra_cobre/2025` y `https://mindicador.cl/api/dolar/2025` (vía red, solo si no existen los archivos locales).
@@ -160,40 +164,47 @@ Proyecto-TIN-G6/
 - **Qué hace:**
   1. Descarta filas de cabecera repetida dentro de los datos y filas de resumen (`TOTAL` o vacías) en `bronze_costos`, registrando cada caso en el log de validaciones.
   2. Estandariza fechas:
-     - Meses de lotes (enteros `1` a `12`) se normalizan al formato canónico `YYYY-MM` asociándolos al año de análisis (`2025`).
+     - La fecha operacional admite `YYYY-MM-DD`, `DD/MM/YYYY`, `DD-MM-YY` y abreviaturas de meses en español. El mes `YYYY-MM` se deriva de esta fecha; el campo `mes` original sólo se conserva para auditoría.
      - Fechas de las series de precios (formato ISO 8601 UTC de la API) se convierten a `YYYY-MM-DD`.
   3. Convierte formatos numéricos:
      - Costos en CLP: elimina símbolos de moneda (`$`), puntos separadores de miles y maneja comas decimales (incluyendo terminaciones `,00`).
      - Lotes: aplica heurística dependiente del campo para resolver la ambigüedad entre puntos como miles en toneladas y puntos decimales en leyes o recuperaciones.
   4. Ejecuta validaciones de campo post-conversión: verifica que los valores numéricos no sean nulos, no sean negativos y se encuentren dentro de los rangos plausibles (`VALID_RANGES` en `business_rules.py`). Valida que los porcentajes estén en escala 0–100.
-  5. Detecta filas duplicadas y registra alertas en el log (las filas se preservan en silver para revisión).
-  6. Comprueba que las series de precios cuenten con cotizaciones para el último día calendario de cada mes.
+  5. Detecta los `lote_id` repetidos y registra alertas (las filas se preservan en silver para revisión).
+  6. Normaliza laboratorio, incluida la coma decimal, sin reemplazar `ley_lab_prom` por el promedio de muestras.
+  7. Comprueba que las series de precios tengan al menos una cotización por mes; Gold usa el último día hábil disponible.
 - **Qué lee:**
   - `bronze/bronze_costos.parquet`
   - `bronze/bronze_lotes.parquet`
+  - `bronze/bronze_leyes_laboratorio.parquet`
   - `bronze/bronze_precio_cobre.parquet`
   - `bronze/bronze_tipo_cambio.parquet`
 - **Qué escribe:**
   - `silver/silver_costos.parquet`
   - `silver/silver_lotes.parquet`
+  - `silver/silver_laboratorio.parquet`
   - `silver/silver_precio_cobre.parquet`
   - `silver/silver_tipo_cambio.parquet`
 
 ### Etapa 3: Cálculo de Métricas (`code/metrics.py`)
 - **Qué hace:**
-  1. Lee los cuatro datasets limpios desde `silver/`.
+  1. Lee los cinco datasets limpios desde `silver/`.
   2. Calcula el cobre fino primero a nivel de cada lote individual en toneladas métricas, suma mensualmente a nivel empresa y convierte la suma a libras una sola vez.
   3. Extrae la cotización del último día hábil disponible de cada mes tanto para el precio del cobre como para el tipo de cambio USD/CLP.
-  4. Suma los costos operacionales de todas las plantas por mes. Si algún componente de costo está ausente (`NaN`), el costo total del mes completo queda como `NaN` para no distorsionar el cálculo.
+  4. Suma los costos operacionales de todas las plantas por mes. Si falta una planta o algún componente, el costo total del mes completo queda como `NaN` para no distorsionar el cálculo.
   5. Une las series mediante un `LEFT JOIN` por mes y calcula: ingresos en USD, costos totales en USD, cash cost por libra y utilidades operacionales en USD.
   6. Valida la presencia de los 12 meses de 2025 y aplica verificaciones de sanidad numérica (no-negatividad y rangos históricos).
 - **Qué lee:**
   - `silver/silver_lotes.parquet`
   - `silver/silver_costos.parquet`
+  - `silver/silver_laboratorio.parquet`
   - `silver/silver_precio_cobre.parquet`
   - `silver/silver_tipo_cambio.parquet`
 - **Qué escribe:**
   - `gold/gold_metricas.parquet`
+  - `gold/gold_sensibilidad_laboratorio.parquet`
+  - `gold/gold_sensibilidad_lotes_repetidos.parquet`
+  - `gold/revision_lotes_2026_laboratorio.parquet`
 
 ### Finalización (`main.py` y `code/validation_log.py`)
 - Al concluir las tres etapas (o al ocurrir una interrupción técnica), `validation_log.write_log()` persiste todas las fallas acumuladas en `validation_log.parquet` y `validation_log.print_summary()` imprime un informe condensado en consola.
@@ -204,7 +215,7 @@ Proyecto-TIN-G6/
 
 Las reglas analíticas están centralizadas en `code/business_rules.py`:
 
-1. **Grano analítico:** Una fila por mes del año 2025 a nivel empresa consolidada. No se realiza seguimiento individual por planta concentradora ni por rajo mina.
+1. **Grano analítico:** Una fila por mes del año 2025 a nivel empresa consolidada. Planta-mes está disponible en el origen de costos y lote-planta-rajo en Silver, pero el resultado destinado a gerencia se mantiene en empresa-mes.
 2. **Fórmula de Cobre Fino (REGLA 2):**
    - A nivel de lote:
      $$\text{cobre\_fino\_lote\_t} = \text{toneladas\_tratadas} \times \left(\frac{\text{ley\_pct}}{100}\right) \times \left(\frac{\text{recuperacion\_pct}}{100}\right)$$
@@ -219,7 +230,7 @@ Las reglas analíticas están centralizadas en `code/business_rules.py`:
      $$\text{costos\_totales\_clp} = \sum (\text{energia\_clp} + \text{insumos\_clp} + \text{mano\_obra\_clp})$$
    - Conversión a USD con el dólar de cierre:
      $$\text{costos\_totales\_usd} = \frac{\text{costos\_totales\_clp}}{\text{tipo\_cambio\_clp\_usd}}$$
-   - *Tratamiento de costos faltantes:* Si para un mes y planta falta algún componente (por ejemplo, el valor `N/A` en `insumos_clp` de la planta Cerro Norte en junio de 2025), la constante `IMPUTE_MISSING_COST = False` determina que **no se imputa con cero**. En consecuencia, `costos_totales_usd` queda como `NaN` para dicho mes, protegiendo al análisis de subestimar costos.
+   - *Tratamiento de costos faltantes:* Deben estar las cuatro plantas y sus tres componentes. Si falta una planta o un componente (por ejemplo, `N/A` en insumos de Cerro Norte en junio), **no se imputa con cero** y el mes queda sin métricas económicas dependientes.
 5. **Ingresos en USD:**
    $$\text{ingresos\_usd} = \text{cobre\_fino\_lb} \times \text{precio\_cobre\_usd\_lb}$$
 6. **Cash Cost (USD/lb):**
@@ -227,6 +238,7 @@ Las reglas analíticas están centralizadas en `code/business_rules.py`:
    Representa el costo operacional unitario por libra producida. Si los costos totales son `NaN`, el cash cost queda como `NaN`.
 7. **Utilidades Operacionales (USD):**
    $$\text{utilidades\_usd} = \text{ingresos\_usd} - \text{costos\_totales\_usd}$$
+   Es un margen directo de referencia valorizado a precio de mercado; no representa utilidad contable ni un precio de venta efectivamente realizado.
 
 ### Esquema final de `gold/gold_metricas.parquet` (7 columnas)
 | Columna | Tipo | Unidad | Descripción |
@@ -235,9 +247,9 @@ Las reglas analíticas están centralizadas en `code/business_rules.py`:
 | `cobre_fino_lb` | float64 | Libras (lb) | Producción total de cobre fino en libras |
 | `precio_cobre_usd_lb` | float64 | USD/lb | Precio del cobre al cierre del mes |
 | `ingresos_usd` | float64 | USD | Ingresos operacionales por venta |
-| `costos_totales_usd` | float64 | USD | Costos operacionales totales en USD (`NaN` en junio) |
-| `cash_cost_usd_lb` | float64 | USD/lb | Costo operacional por libra producida (`NaN` en junio) |
-| `utilidades_usd` | float64 | USD | Utilidad operacional del mes (`NaN` en junio) |
+| `costos_totales_usd` | float64 | USD | Costos operacionales totales en USD (`NaN` en marzo, junio, agosto y noviembre) |
+| `cash_cost_usd_lb` | float64 | USD/lb | Costo operacional por libra producida (`NaN` en esos cuatro meses) |
+| `utilidades_usd` | float64 | USD | Margen directo de referencia (`NaN` en esos cuatro meses) |
 
 ---
 
@@ -324,5 +336,21 @@ A continuación se detallan las incidencias técnicas y operacionales reales que
    - *Causa:* Se eliminó o modificó la ubicación de alguno de los archivos originales en `raw/` (`origen_mina.sqlite`, `origen_costos_planta.csv`, `origen_leyes_laboratorio.json`).
    - *Solución:* Asegúrese de que la carpeta `raw/` contenga íntegros los tres archivos originales entregados.
 
-4. **Presencia de valores `NaN` en `gold_metricas.parquet` para el mes de junio (`2025-06`):**
-   - *Causa:* No constituye un error del código ni del entorno. En `raw/origen_costos_planta.csv`, la planta Cerro Norte registra `N/A` en la columna `insumos_clp` para junio. En cumplimiento de la regla de negocio `REGLA 3` (`IMPUTE_MISSING_COST = False`), el pipeline no inventa costos parciales ni imputa ceros, resultando en `NaN` para `costos_totales_usd`, `cash_cost_usd_lb` y `utilidades_usd` de dicho mes. La alerta correspondiente queda documentada en `validation_log.parquet`.
+4. **Presencia de valores `NaN` en marzo, junio, agosto y noviembre:**
+   - *Causa:* No constituye un error del código ni del entorno. Falta Loa en marzo y agosto, falta Salado en noviembre y Cerro Norte registra `N/A` en insumos de junio. El pipeline no suma parcialmente ni imputa ceros. Las alertas quedan documentadas en `validation_log.parquet`.
+
+---
+
+## 11. Conciliación E1 y análisis de sensibilidad
+
+La corrida vigente conserva los 14.598 lotes originales. La fecha normalizada identifica 86 registros fechados en 2026, que se excluyen sin corregir ni reintegrar. Entre los lotes de 2025 se excluyen otros 272 por las reglas `0 < ley_pct < 5`, `50 <= recuperacion_pct <= 100` y `toneladas_tratadas >= 100`. El resultado es 358 exclusiones únicas (2,45 %) y 14.240 lotes elegibles. Los 144 identificadores `lote_id` repetidos se mantienen; su eliminación se documenta sólo como sensibilidad separada.
+
+De los 879 análisis de laboratorio, 843 se vinculan a lotes elegibles de 2025 (aproximadamente 5,9 %). La alternativa mensual calcula `f = Σ(T × ley_lab_prom) / Σ(T × ley_operacional)` y aplica ese factor al cobre fino principal, sin cambiar la definición oficial de Gold.
+
+Los resultados conciliados son: cash cost enero `1,845768 USD/lb`, diciembre `3,408989 USD/lb`, variación `+84,692 %`, cash cost ponderado de los ocho meses completos `2,340304 USD/lb`, margen de referencia `2,233095 USD/lb` en S1 y `2,125960 USD/lb` en S2, efecto precio `+0,598223 USD/lb` y efecto costo `-0,705358 USD/lb`.
+
+Las pruebas se ejecutan con:
+
+```bash
+python -m unittest discover -s tests -v
+```

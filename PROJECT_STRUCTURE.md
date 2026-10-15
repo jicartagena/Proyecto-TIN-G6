@@ -22,7 +22,7 @@ mueva o elimine un archivo relevante.
 ├── raw/                       # Fuentes originales — NO MODIFICAR
 │   ├── origen_mina.sqlite     # Base operacional: lotes de producción
 │   ├── origen_costos_planta.csv  # Costos de planta (energía, insumos, mano de obra)
-│   ├── origen_leyes_laboratorio.json  # Leyes de laboratorio (entra al proceso; no se usa en el análisis)
+│   ├── origen_leyes_laboratorio.json  # Leyes de laboratorio para sensibilidad separada
 │   └── [precio_cobre_2025.json]   # Respuesta API cobre — escrito por extraction.py
 │   └── [tipo_cambio_2025.json]    # Respuesta API dólar — escrito por extraction.py
 │
@@ -34,10 +34,17 @@ mueva o elimine un archivo relevante.
 │   └── [generado por extraction.py]
 │
 ├── silver/                    # Datos limpios y tipados, Parquet
-│   └── [generado por cleaning.py]
+│   ├── silver_laboratorio.parquet  # Laboratorio normalizado y vinculable por lote_id
+│   └── [otros generados por cleaning.py]
 │
-└── gold/                      # Métricas mensuales a nivel empresa, Parquet
-    └── gold_metricas.parquet  # [generado por metrics.py] — 12 filas (una por mes de 2025), 7 columnas
+├── gold/                      # Métricas mensuales a nivel empresa, Parquet
+    ├── gold_metricas.parquet  # [generado por metrics.py] — 12 filas, 7 columnas
+    ├── gold_sensibilidad_laboratorio.parquet
+    ├── gold_sensibilidad_lotes_repetidos.parquet
+    └── revision_lotes_2026_laboratorio.parquet
+
+└── tests/
+    └── test_pipeline.py       # Pruebas unitarias y controles de conciliación
 ```
 
 ---
@@ -51,7 +58,7 @@ mueva o elimine un archivo relevante.
 | `validation_log.py` | Registro de fallas de validación: acumulación, escritura y resumen        | Compartido  |
 | `extraction.py`     | Etapa 1 — Extrae fuentes a bronze/ y guarda respuesta de la API en raw/   | Extracción  |
 | `cleaning.py`       | Etapa 2 — Estandariza formatos, valida campos, elimina cabeceras/TOTAL, detecta duplicados y faltantes; produce silver/ | Limpieza    |
-| `metrics.py`        | Etapa 3 — Calcula métricas desde silver/, produce gold/                   | Métricas    |
+| `metrics.py`        | Etapa 3 — Calcula Gold principal y sensibilidades separadas desde silver/ | Métricas    |
 
 ---
 
@@ -78,7 +85,7 @@ Cada etapa lee solo la capa anterior; nunca salta capas ni hace llamadas de red
 | `raw/tipo_cambio_2025.json`  | `extraction.py`   | Respuesta JSON de la API del tipo de cambio      |
 | `bronze/*.parquet`           | `extraction.py`   | Datos extraídos sin limpiar                      |
 | `silver/*.parquet`           | `cleaning.py`     | Datos limpios y tipados                          |
-| `gold/*.parquet`             | `metrics.py`      | Métricas mensuales finales                       |
+| `gold/*.parquet`             | `metrics.py`      | Métrica principal, sensibilidades y revisión 2026|
 | `validation_log.parquet`     | `validation_log.py` (llamado por `main.py`) | Log tabular de fallas de validación |
 
 ---

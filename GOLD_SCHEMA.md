@@ -14,6 +14,8 @@ en la carpeta `gold/`.
 - **Grano mensual a nivel empresa:** una fila por mes de 2025. No hay
   desglose por planta ni por rajo (decisión de diseño documentada en
   ARCHITECTURE.md, decisiones 11 y 19).
+- **Granos de origen conservados en Silver:** costos planta-mes y operación
+  lote-planta-rajo están disponibles antes de la consolidación empresa-mes.
 - **Sin dimensiones:** no existe `dim_planta` ni `dim_tiempo`; el mes se
   almacena directamente como columna de la tabla de hechos.
 - **NaN explícito ante datos incompletos:** si falta cualquier input de un
@@ -43,10 +45,10 @@ en la carpeta `gold/`.
 | 1 | `mes`                 | string  | —         | Mes del año en formato `YYYY-MM` (ej. `"2025-06"`).         |
 | 2 | `cobre_fino_lb`       | float64 | lb        | Libras de cobre fino producidas en el mes (ver Fórmula A).  |
 | 3 | `precio_cobre_usd_lb` | float64 | USD/lb    | Precio del cobre del último día hábil del mes (Fórmula B).  |
-| 4 | `ingresos_usd`        | float64 | USD       | Ingresos por venta de cobre en el mes (Fórmula C).          |
+| 4 | `ingresos_usd`        | float64 | USD       | Valorización de referencia a precio de mercado (Fórmula C). |
 | 5 | `costos_totales_usd`  | float64 | USD       | Costos operacionales totales en USD (Fórmula D). NaN si falta algún componente de costo. |
 | 6 | `cash_cost_usd_lb`    | float64 | USD/lb    | Costo operacional por libra de cobre fino (Fórmula E). NaN si `costos_totales_usd` es NaN. |
-| 7 | `utilidades_usd`      | float64 | USD       | Utilidad operacional del mes (Fórmula F). NaN si `costos_totales_usd` es NaN. |
+| 7 | `utilidades_usd`      | float64 | USD       | Margen directo de referencia (Fórmula F). No es utilidad contable. |
 
 ---
 
@@ -110,12 +112,13 @@ costos_totales_clp = SUM(energia_clp + insumos_clp + mano_obra_clp)
 costos_totales_usd = costos_totales_clp / tipo_cambio_clp_usd
 ```
 
-Si cualquier fila del mes tiene un componente en NaN (ej. `insumos_clp`
-de una planta), el total del mes completo queda NaN para no subvalorar
-los costos. Se emite una alerta identificando la fila y el campo faltantes
+Antes de sumar se exige la presencia de Cerro Norte, Loa, Salado e Illapel.
+Si falta una planta o cualquier fila del mes tiene un componente en NaN
+(ej. `insumos_clp` de una planta), el total del mes completo queda NaN para
+no subvalorar los costos. Se emite una alerta identificando la causa
 (REGLA 3 de `business_rules.py`, `IMPUTE_MISSING_COST=False`).
 
-**Fuente:** `silver/silver_costos.parquet` (columnas `mes`, `energia_clp`,
+**Fuente:** `silver/silver_costos.parquet` (columnas `planta`, `mes`, `energia_clp`,
 `insumos_clp`, `mano_obra_clp`).
 
 ---
@@ -141,7 +144,9 @@ Queda NaN si `costos_totales_usd` es NaN.
 utilidades_usd = ingresos_usd - costos_totales_usd
 ```
 
-Utilidad operacional antes de impuestos e intereses. Queda NaN si
+Este nombre se conserva por compatibilidad con el esquema original, pero el
+valor es un margen directo de referencia construido con precio de mercado.
+No representa utilidad contable ni precio de venta realizado. Queda NaN si
 `costos_totales_usd` es NaN.
 
 ---
@@ -150,6 +155,7 @@ Utilidad operacional antes de impuestos e intereses. Queda NaN si
 
 | Dato faltante                        | Columnas afectadas en gold                                      | Alerta emitida |
 |--------------------------------------|-----------------------------------------------------------------|----------------|
+| Planta ausente en el mes             | `costos_totales_usd`, `cash_cost_usd_lb`, `utilidades_usd`      | Sí (REGLA 3)   |
 | Componente de costo NaN (una planta) | `costos_totales_usd`, `cash_cost_usd_lb`, `utilidades_usd`      | Sí (REGLA 3)   |
 | Sin cotización de precio del cobre   | `precio_cobre_usd_lb`, `ingresos_usd`, `cash_cost_usd_lb`, `utilidades_usd` | Sí (REGLA 4) |
 | Sin cotización del dólar             | `costos_totales_usd`, `cash_cost_usd_lb`, `utilidades_usd`      | Sí (REGLA 4)   |
@@ -175,11 +181,30 @@ valores calculados ni detienen la ejecución.
 
 ## Estado conocido de los datos (2025)
 
-- **2025-06:** `costos_totales_usd`, `cash_cost_usd_lb` y `utilidades_usd`
-  son NaN. La planta Cerro Norte no reportó `insumos_clp` para ese mes
-  (valor `N/A` en el CSV original). Ver alerta en `validation_log.parquet`
-  con `rule = REGLA 3 / IMPUTE_MISSING_COST=False`.
-- Los 11 meses restantes tienen las 7 columnas completas.
+- **2025-03 y 2025-08:** falta la planta Loa.
+- **2025-06:** Cerro Norte no reportó `insumos_clp` (`N/A`).
+- **2025-11:** falta la planta Salado.
+- La producción permanece disponible en los 12 meses; las métricas económicas
+  dependientes del costo son NaN en esos cuatro meses. Los ocho restantes
+  tienen las 7 columnas completas.
+
+---
+
+## Resultados auxiliares y conciliación E1
+
+- `gold_sensibilidad_laboratorio.parquet`: usa 843 análisis vinculables y
+  calcula por mes `f = Σ(T × ley_lab_prom) / Σ(T × ley_operacional)`. Ajusta
+  cobre fino y cash cost sólo como alternativa; no cambia Gold principal.
+- `gold_sensibilidad_lotes_repetidos.parquet`: escenario no adoptado que
+  conserva la primera ocurrencia de cada `lote_id` para documentar sensibilidad.
+- `revision_lotes_2026_laboratorio.parquet`: conserva los 86 lotes fechados en
+  2026 y muestra sus correspondencias de laboratorio cuando existen.
+
+La conciliación vigente obtiene cash cost de `1,845768 USD/lb` en enero y
+`3,408989 USD/lb` en diciembre, variación `+84,692 %` y cash cost ponderado
+`2,340304 USD/lb` en los ocho meses completos. El margen de referencia es
+`2,233095 USD/lb` en S1 y `2,125960 USD/lb` en S2; el efecto precio es
+`+0,598223 USD/lb` y el efecto costo `-0,705358 USD/lb`.
 
 ---
 

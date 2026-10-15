@@ -6,7 +6,7 @@ Etapa 3 del pipeline: Cálculo de métricas mensuales a nivel empresa.
 Lee ÚNICAMENTE desde silver/ y escribe una tabla Parquet en gold/.
 
 Responsabilidades:
-  1. Leer los cuatro archivos silver necesarios.
+  1. Leer los cinco archivos silver necesarios, incluido laboratorio.
   2. Calcular cobre fino por lote y agregar a nivel mensual (REGLA 2).
   3. Obtener el precio del cobre y el tipo de cambio del último día hábil
      de cada mes (REGLA 1 y REGLA 4).
@@ -51,25 +51,30 @@ GOLD_FILENAME = "gold_metricas.parquet"
 # Etiqueta de etapa usada en todos los registros del log de validaciones
 _STAGE = "metrics"
 
+EXPECTED_MONTHS = [f"{ANALYSIS_YEAR}-{month:02d}" for month in range(1, 13)]
+S1_MONTHS = ["2025-01", "2025-02", "2025-04", "2025-05"]
+S2_MONTHS = ["2025-07", "2025-09", "2025-10", "2025-12"]
+
 
 # ---------------------------------------------------------------------------
 # Funciones de lectura
 # ---------------------------------------------------------------------------
 
 
-def _load_silver() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def _load_silver() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Lee los cuatro archivos Parquet de silver/ que necesita esta etapa.
+    Lee los cinco archivos Parquet de silver/ que necesita esta etapa.
 
-    Retorna una tupla (lotes, costos, precio_cobre, tipo_cambio).
+    Retorna una tupla (lotes, costos, laboratorio, precio_cobre, tipo_cambio).
     Lanza FileNotFoundError si algún archivo no existe, porque sin esos
     datos la etapa no puede continuar.
     """
     lotes = pd.read_parquet(SILVER_DIR / "silver_lotes.parquet")
     costos = pd.read_parquet(SILVER_DIR / "silver_costos.parquet")
+    laboratorio = pd.read_parquet(SILVER_DIR / "silver_laboratorio.parquet")
     precio_cobre = pd.read_parquet(SILVER_DIR / "silver_precio_cobre.parquet")
     tipo_cambio = pd.read_parquet(SILVER_DIR / "silver_tipo_cambio.parquet")
-    return lotes, costos, precio_cobre, tipo_cambio
+    return lotes, costos, laboratorio, precio_cobre, tipo_cambio
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +103,8 @@ def _calcular_cobre_fino_mensual(lotes: pd.DataFrame) -> pd.DataFrame:
     """
     # Cálculo a nivel de lote (en toneladas métricas)
     lotes = lotes.copy()
+    if "es_elegible" in lotes.columns:
+        lotes = lotes[lotes["es_elegible"]].copy()
     lotes["cobre_fino_lote_t"] = (
         lotes["toneladas_tratadas"]
         * (lotes["ley_pct"] / 100.0)
@@ -181,6 +188,41 @@ def _calcular_costos_clp_mensual(costos: pd.DataFrame) -> pd.DataFrame:
     componentes = ["energia_clp", "insumos_clp", "mano_obra_clp"]
     meses_incompletos: set[str] = set()
 
+    # La ausencia de una planta no genera NaN por sí sola al sumar; por eso se
+    # valida explícitamente el catálogo completo antes de consolidar.
+    for mes in EXPECTED_MONTHS:
+        filas_mes = costos[costos["mes"] == mes]
+        plantas_presentes = set(filas_mes["planta"].dropna().astype(str))
+        plantas_faltantes = sorted(br.EXPECTED_PLANTS - plantas_presentes)
+        for planta in plantas_faltantes:
+            meses_incompletos.add(mes)
+            validation_log.register_failure(
+                stage=_STAGE,
+                dataset="silver_costos",
+                source_ref=mes,
+                field="planta",
+                value=planta,
+                rule=(
+                    f"REGLA 3: planta '{planta}' ausente en {mes}; "
+                    "costos_totales_usd quedará NaN para ese mes."
+                ),
+            )
+
+        duplicadas = filas_mes["planta"].value_counts()
+        for planta in duplicadas[duplicadas > 1].index:
+            meses_incompletos.add(mes)
+            validation_log.register_failure(
+                stage=_STAGE,
+                dataset="silver_costos",
+                source_ref=mes,
+                field="planta",
+                value=planta,
+                rule=(
+                    f"REGLA 3: más de una fila para planta '{planta}' en {mes}; "
+                    "costo mensual no calculable sin una regla adicional."
+                ),
+            )
+
     for col in componentes:
         filas_nan = costos[costos[col].isna()]
         for _, fila in filas_nan.iterrows():
@@ -214,6 +256,9 @@ def _calcular_costos_clp_mensual(costos: pd.DataFrame) -> pd.DataFrame:
     mensual = (
         costos.groupby("mes", as_index=False)["costos_totales_clp"]
         .sum(min_count=1)
+    )
+    mensual = pd.DataFrame({"mes": EXPECTED_MONTHS}).merge(
+        mensual, on="mes", how="left"
     )
     if meses_incompletos:
         mascara = mensual["mes"].isin(meses_incompletos)
@@ -309,6 +354,169 @@ def _verificar_sanidad(gold: pd.DataFrame) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Resultados auxiliares: laboratorio, repetidos y revisión 2026
+# ---------------------------------------------------------------------------
+
+
+def _build_lab_sensitivity(
+    lotes: pd.DataFrame, laboratorio: pd.DataFrame, gold: pd.DataFrame
+) -> pd.DataFrame:
+    """Recalcula un cash cost alternativo con la calibración mensual acordada."""
+    lotes_validos = lotes[lotes["es_elegible"]].copy()
+    laboratorio_valido = laboratorio.dropna(subset=["lote_id", "ley_lab_prom"])[
+        ["lote_id", "ley_lab_prom"]
+    ]
+    pareados = lotes_validos.merge(
+        laboratorio_valido, on="lote_id", how="inner", validate="many_to_one"
+    )
+    pareados["numerador"] = (
+        pareados["toneladas_tratadas"] * pareados["ley_lab_prom"]
+    )
+    pareados["denominador"] = (
+        pareados["toneladas_tratadas"] * pareados["ley_pct"]
+    )
+    mensual = pareados.groupby("mes", as_index=False).agg(
+        registros_operacionales_pareados=("lote_id", "size"),
+        registros_laboratorio_vinculables=("lote_id", "nunique"),
+        numerador=("numerador", "sum"),
+        denominador=("denominador", "sum"),
+    )
+    mensual["factor_calibracion_ley"] = (
+        mensual["numerador"] / mensual["denominador"]
+    )
+
+    resultado = gold[
+        ["mes", "cobre_fino_lb", "costos_totales_usd", "cash_cost_usd_lb"]
+    ].merge(
+        mensual[
+            [
+                "mes", "registros_operacionales_pareados",
+                "registros_laboratorio_vinculables", "factor_calibracion_ley",
+            ]
+        ],
+        on="mes",
+        how="left",
+    )
+    resultado = resultado.rename(columns={
+        "cobre_fino_lb": "cobre_fino_lb_principal",
+        "cash_cost_usd_lb": "cash_cost_usd_lb_principal",
+    })
+    resultado["cobre_fino_lb_calibrado"] = (
+        resultado["cobre_fino_lb_principal"]
+        * resultado["factor_calibracion_ley"]
+    )
+    resultado["cash_cost_usd_lb_calibrado"] = (
+        resultado["costos_totales_usd"] / resultado["cobre_fino_lb_calibrado"]
+    )
+    resultado["variacion_cash_cost_pct"] = (
+        resultado["cash_cost_usd_lb_calibrado"]
+        / resultado["cash_cost_usd_lb_principal"] - 1
+    ) * 100
+    return resultado
+
+
+def _build_duplicate_sensitivity(lotes: pd.DataFrame, gold: pd.DataFrame) -> pd.DataFrame:
+    """Escenario no adoptado: conserva la primera ocurrencia de cada lote_id."""
+    lotes_validos = lotes[lotes["es_elegible"]].copy()
+    lotes_validos["source_order"] = pd.to_numeric(
+        lotes_validos["source_row_index"], errors="coerce"
+    )
+    sin_repeticiones = (
+        lotes_validos.sort_values("source_order")
+        .drop_duplicates("lote_id", keep="first")
+    )
+    alternativo = _calcular_cobre_fino_mensual(sin_repeticiones).rename(
+        columns={"cobre_fino_lb": "cobre_fino_lb_sin_repeticiones_adicionales"}
+    )
+    resultado = gold[["mes", "cobre_fino_lb"]].merge(
+        alternativo, on="mes", how="left"
+    )
+    resultado["variacion_cobre_fino_pct"] = (
+        resultado["cobre_fino_lb_sin_repeticiones_adicionales"]
+        / resultado["cobre_fino_lb"] - 1
+    ) * 100
+    return resultado
+
+
+def _build_2026_review(lotes: pd.DataFrame, laboratorio: pd.DataFrame) -> pd.DataFrame:
+    """Conserva los lotes fechados en 2026 y sus correspondencias de laboratorio."""
+    lotes_2026 = lotes[
+        lotes["fecha"].astype("string").str.startswith("2026-", na=False)
+    ].copy()
+    lab = laboratorio[
+        ["lote_id", "laboratorio", "fecha_muestreo", "ley_lab_prom", "source_row_index"]
+    ].rename(columns={"source_row_index": "lab_source_row_index"})
+    resultado = lotes_2026.merge(
+        lab, on="lote_id", how="left", validate="many_to_one"
+    )
+    resultado["tiene_laboratorio"] = resultado["ley_lab_prom"].notna()
+    return resultado
+
+
+def _reconcile_sources(lotes: pd.DataFrame, laboratorio: pd.DataFrame) -> dict[str, int]:
+    """Compara conteos observados con las aserciones acordadas, sin forzarlos."""
+    fechas = lotes["fecha"].astype("string")
+    es_2025 = fechas.str.startswith(f"{ANALYSIS_YEAR}-", na=False)
+    es_2026 = fechas.str.startswith("2026-", na=False)
+    ids_validos = set(lotes.loc[lotes["es_elegible"], "lote_id"].dropna())
+    conteos = {
+        "lotes_originales": len(lotes),
+        "lotes_2026": int(es_2026.sum()),
+        "exclusiones_calidad_2025": int((es_2025 & ~lotes["es_elegible"]).sum()),
+        "exclusiones_unicas": int((~lotes["es_elegible"]).sum()),
+        "lotes_elegibles": int(lotes["es_elegible"].sum()),
+        "lote_id_repetidos": int((lotes["lote_id"].value_counts() > 1).sum()),
+        "laboratorio_vinculable": int(laboratorio["lote_id"].isin(ids_validos).sum()),
+    }
+    for nombre, observado in conteos.items():
+        esperado = br.EXPECTED_SOURCE_COUNTS[nombre]
+        if observado != esperado:
+            validation_log.register_failure(
+                stage=_STAGE,
+                dataset="reconciliacion",
+                source_ref=nombre,
+                field=nombre,
+                value=observado,
+                rule=f"control esperado={esperado}; observado={observado}",
+            )
+    return conteos
+
+
+def _weighted_metrics(gold: pd.DataFrame, meses: list[str]) -> tuple[float, float, float]:
+    subset = gold[gold["mes"].isin(meses)].dropna(subset=["costos_totales_usd"])
+    libras = subset["cobre_fino_lb"].sum()
+    precio = (
+        subset["precio_cobre_usd_lb"] * subset["cobre_fino_lb"]
+    ).sum() / libras
+    costo = subset["costos_totales_usd"].sum() / libras
+    return precio, costo, precio - costo
+
+
+def calcular_resumen_reconciliacion(gold: pd.DataFrame) -> dict[str, float]:
+    """Calcula las cifras de conciliación desde Gold, sin escribir valores manuales."""
+    por_mes = gold.set_index("mes")
+    completos = gold.dropna(subset=["costos_totales_usd"])
+    precio_s1, costo_s1, margen_s1 = _weighted_metrics(gold, S1_MONTHS)
+    precio_s2, costo_s2, margen_s2 = _weighted_metrics(gold, S2_MONTHS)
+    return {
+        "cash_cost_enero": float(por_mes.loc["2025-01", "cash_cost_usd_lb"]),
+        "cash_cost_diciembre": float(por_mes.loc["2025-12", "cash_cost_usd_lb"]),
+        "variacion_enero_diciembre_pct": float((
+            por_mes.loc["2025-12", "cash_cost_usd_lb"]
+            / por_mes.loc["2025-01", "cash_cost_usd_lb"] - 1
+        ) * 100),
+        "cash_cost_ponderado_meses_completos": float(
+            completos["costos_totales_usd"].sum()
+            / completos["cobre_fino_lb"].sum()
+        ),
+        "margen_unitario_s1": float(margen_s1),
+        "margen_unitario_s2": float(margen_s2),
+        "efecto_precio": float(precio_s2 - precio_s1),
+        "efecto_costo": float(-(costo_s2 - costo_s1)),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Punto de entrada público
 # ---------------------------------------------------------------------------
 
@@ -324,7 +532,8 @@ def run_metrics() -> None:
     main.py la llama directamente.
     """
     print("[metrics] Leyendo datos desde silver/...")
-    lotes, costos, precio_cobre, tipo_cambio = _load_silver()
+    lotes, costos, laboratorio, precio_cobre, tipo_cambio = _load_silver()
+    conteos = _reconcile_sources(lotes, laboratorio)
 
     # ------------------------------------------------------------------
     # REGLA 2: cobre fino mensual en libras
@@ -403,6 +612,12 @@ def run_metrics() -> None:
     gold = gold.sort_values("mes").reset_index(drop=True)
     gold = gold[GOLD_COLUMNS]
 
+    # Resultados separados: no alteran el esquema ni la definición principal.
+    sensibilidad_lab = _build_lab_sensitivity(lotes, laboratorio, gold)
+    sensibilidad_repetidos = _build_duplicate_sensitivity(lotes, gold)
+    revision_2026 = _build_2026_review(lotes, laboratorio)
+    resumen = calcular_resumen_reconciliacion(gold)
+
     # ------------------------------------------------------------------
     # REGLA 6: verificar que estén los 12 meses
     # ------------------------------------------------------------------
@@ -421,5 +636,16 @@ def run_metrics() -> None:
     GOLD_DIR.mkdir(parents=True, exist_ok=True)
     gold_path = GOLD_DIR / GOLD_FILENAME
     gold.to_parquet(gold_path, index=False)
+    sensibilidad_lab.to_parquet(
+        GOLD_DIR / "gold_sensibilidad_laboratorio.parquet", index=False
+    )
+    sensibilidad_repetidos.to_parquet(
+        GOLD_DIR / "gold_sensibilidad_lotes_repetidos.parquet", index=False
+    )
+    revision_2026.to_parquet(
+        GOLD_DIR / "revision_lotes_2026_laboratorio.parquet", index=False
+    )
     print(f"[metrics] gold guardado en: {gold_path}")
     print(f"[metrics] Filas en gold: {len(gold)} | Columnas: {list(gold.columns)}")
+    print(f"[metrics] Controles de conciliacion: {conteos}")
+    print(f"[metrics] Resumen de indicadores: {resumen}")

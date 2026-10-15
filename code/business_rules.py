@@ -54,6 +54,31 @@ rangos de sanidad usados en métricas.
 # Este comportamiento se controla con la constante siguiente:
 IMPUTE_MISSING_COST = False  # True = imputar con cero; False = dejar NaN y alertar
 
+# La completitud mensual requiere presencia de las cuatro plantas, además de
+# los tres componentes de costo. Planta-mes sigue siendo el grano de origen;
+# la agregación final se mantiene a nivel empresa-mes.
+EXPECTED_PLANTS = {"Cerro Norte", "Loa", "Salado", "Illapel"}
+
+# Controles de conciliación de la fuente vigente. Son aserciones para detectar
+# diferencias; nunca se usan para rellenar ni forzar resultados.
+EXPECTED_SOURCE_COUNTS = {
+    "lotes_originales": 14_598,
+    "lotes_2026": 86,
+    "exclusiones_calidad_2025": 272,
+    "exclusiones_unicas": 358,
+    "lotes_elegibles": 14_240,
+    "lote_id_repetidos": 144,
+    "laboratorio_vinculable": 843,
+}
+
+# Elegibilidad de lotes para el cálculo principal. La fecha normalizada debe
+# pertenecer a 2025; el campo mes original se usa sólo como control.
+LOT_GRADE_MIN_EXCLUSIVE = 0.0
+LOT_GRADE_MAX_EXCLUSIVE = 5.0
+LOT_RECOVERY_MIN_INCLUSIVE = 50.0
+LOT_RECOVERY_MAX_INCLUSIVE = 100.0
+LOT_TONNES_MIN_INCLUSIVE = 100.0
+
 # Lugar de aplicación: etapa de limpieza (cleaning.py) y métricas (metrics.py).
 #
 # Justificación: imputar un costo con cero distorsionaría el cash cost.

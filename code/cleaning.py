@@ -7,11 +7,10 @@ Lee exclusivamente desde bronze/ (Parquet, todos los valores como texto) y escri
 datos limpios y tipados a silver/ (Parquet).
 
 Responsabilidades:
-  1. Leer bronze_costos, bronze_lotes, bronze_precio_cobre y bronze_tipo_cambio.
-     (bronze_leyes_laboratorio permanece en bronze; no va a silver por decision de diseno.)
+  1. Leer los cinco conjuntos bronze, incluido laboratorio.
   2. Eliminar filas de cabecera repetida y la fila TOTAL de costos; registrar cada eliminacion.
   3. Estandarizar formatos:
-       - mes (lotes)     : entero de mes -> string canonico "YYYY-MM" (anio = ANALYSIS_YEAR)
+       - fecha (lotes)   : cuatro formatos observados -> "YYYY-MM-DD"; mes derivado de fecha
        - mes (costos)    : "YYYY-MM" ya canonico -> validar y dejar como string
        - fecha (series)  : ISO 8601 UTC -> "YYYY-MM-DD"
        - numericos costos: eliminar "$", puntos de miles, comas decimales, ",00" -> float
@@ -20,14 +19,17 @@ Responsabilidades:
      Una falla de validacion se registra en el log y NUNCA detiene la ejecucion.
   5. Detectar duplicados y registrar alertas (no se eliminan).
   6. Verificar que las series de precios tengan cotizacion en el ultimo dia de cada mes.
-  7. Escribir silver_costos, silver_lotes, silver_precio_cobre y silver_tipo_cambio.
+  7. Escribir silver_costos, silver_lotes, silver_laboratorio y las dos series de precios.
 
 Por que esta etapa existe separada de las metricas:
   Separa "limpiar" de "calcular". Silver contiene solo datos tipados y verificados;
   ninguna metrica derivada, ninguna agregacion y ninguna conversion de moneda.
 """
 
+import json
 import re
+import unicodedata
+from datetime import datetime
 import pandas as pd
 
 from config import BRONZE_DIR, SILVER_DIR, ANALYSIS_YEAR
@@ -47,6 +49,29 @@ _CANONICAL_MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 # Patron canonico de fecha: "YYYY-MM-DD"
 _CANONICAL_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+# Abreviaturas observadas en la fuente operacional.
+_SPANISH_MONTHS = {
+    "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
+    "jul": 7, "ago": 8, "sep": 9, "sept": 9, "oct": 10,
+    "nov": 11, "dic": 12,
+}
+
+# Variantes observadas en el CSV de costos.
+_PLANT_ALIASES = {
+    "CERRO NORTE": "Cerro Norte",
+    "P. CERRO NORTE": "Cerro Norte",
+    "PLANTA CERRO NORTE": "Cerro Norte",
+    "LOA": "Loa",
+    "P. LOA": "Loa",
+    "PLANTA LOA": "Loa",
+    "SALADO": "Salado",
+    "P. SALADO": "Salado",
+    "PLANTA SALADO": "Salado",
+    "ILLAPEL": "Illapel",
+    "P. ILLAPEL": "Illapel",
+    "PLANTA ILLAPEL": "Illapel",
+}
+
 
 # ===========================================================================
 # FUNCIONES DE CONVERSION NUMERICA
@@ -64,7 +89,7 @@ def _parse_clp_amount(raw: str):
 
     Retorna None si la conversion falla; el llamador registrara la alerta.
     """
-    s = raw.strip()
+    s = str(raw).strip()
     if not s:
         return None
     # Eliminar simbolo de moneda
@@ -115,7 +140,7 @@ def _parse_numeric_lotes(raw: str, field: str):
 
     Retorna None si la conversion falla.
     """
-    s = raw.strip()
+    s = str(raw).strip()
     if not s:
         return None
 
@@ -199,6 +224,78 @@ def _standardize_date_iso(raw: str):
         return dt.strftime("%Y-%m-%d")
     except Exception:
         return None
+
+
+def _standardize_operational_date(raw: str):
+    """
+    Normaliza la fecha operacional usando únicamente los cuatro formatos
+    observados: YYYY-MM-DD, DD/MM/YYYY, DD-MM-YY y D-mmm-YYYY con mes en
+    español. Los formatos con día primero se interpretan explícitamente para
+    no invertir día y mes de manera heurística.
+    """
+    s = str(raw).strip().lower()
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+            parsed = datetime.strptime(s, "%Y-%m-%d")
+        elif re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", s):
+            parsed = datetime.strptime(s, "%d/%m/%Y")
+        elif re.fullmatch(r"\d{1,2}-\d{1,2}-\d{2}", s):
+            parsed = datetime.strptime(s, "%d-%m-%y")
+        else:
+            match = re.fullmatch(r"(\d{1,2})-([a-záéíóúñ]+)-(\d{4})", s)
+            if not match:
+                return None
+            token = "".join(
+                char for char in unicodedata.normalize("NFD", match.group(2))
+                if unicodedata.category(char) != "Mn"
+            )
+            month = _SPANISH_MONTHS.get(token)
+            if month is None:
+                return None
+            parsed = datetime(int(match.group(3)), month, int(match.group(1)))
+    except ValueError:
+        return None
+    return parsed.strftime("%Y-%m-%d")
+
+
+def _standardize_plant(raw: str):
+    """Normaliza las variantes de planta presentes en el CSV."""
+    key = " ".join(str(raw).strip().upper().split())
+    return _PLANT_ALIASES.get(key)
+
+
+def _parse_integer(raw: str):
+    """Convierte un identificador entero; retorna None si no es interpretable."""
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def evaluar_elegibilidad_lote(fecha, toneladas, ley, recuperacion) -> list[str]:
+    """Retorna las causas de exclusión del cálculo principal."""
+    causas = []
+    if fecha is None:
+        causas.append("fecha_no_interpretable")
+    elif int(fecha[:4]) != ANALYSIS_YEAR:
+        causas.append(f"fecha_fuera_de_{ANALYSIS_YEAR}")
+    if toneladas is None:
+        causas.append("toneladas_no_interpretables")
+    elif toneladas < br.LOT_TONNES_MIN_INCLUSIVE:
+        causas.append("toneladas_menores_a_100")
+    if ley is None:
+        causas.append("ley_no_interpretable")
+    elif not (br.LOT_GRADE_MIN_EXCLUSIVE < ley < br.LOT_GRADE_MAX_EXCLUSIVE):
+        causas.append("ley_fuera_de_0_a_5_exclusivo")
+    if recuperacion is None:
+        causas.append("recuperacion_no_interpretable")
+    elif not (
+        br.LOT_RECOVERY_MIN_INCLUSIVE
+        <= recuperacion
+        <= br.LOT_RECOVERY_MAX_INCLUSIVE
+    ):
+        causas.append("recuperacion_fuera_de_50_a_100")
+    return causas
 
 
 # ===========================================================================
@@ -356,7 +453,8 @@ def _clean_costos(df: pd.DataFrame) -> pd.DataFrame:
       6. Detectar filas duplicadas (misma combinacion mes+energia+insumos+mano_obra).
          Las filas duplicadas se mantienen en silver; solo se alerta.
 
-    Las plantas no se identifican ni se estandarizan (fuera de alcance por diseno).
+    La planta se conserva y se estandariza porque la completitud mensual exige
+    verificar la presencia de las cuatro plantas esperadas.
     """
     dataset = "bronze_costos"
     numeric_fields = ["energia_clp", "insumos_clp", "mano_obra_clp"]
@@ -365,6 +463,7 @@ def _clean_costos(df: pd.DataFrame) -> pd.DataFrame:
     for _, row in df.iterrows():
         ref = row["source_row_index"]
         mes_raw = str(row["mes"]).strip()
+        planta_raw = str(row["planta"]).strip()
 
         # Paso 1: detectar y descartar cabecera repetida
         if mes_raw.lower() == "mes":
@@ -387,6 +486,13 @@ def _clean_costos(df: pd.DataFrame) -> pd.DataFrame:
         # Paso 3: estandarizar mes
         mes_clean = _standardize_month_costos(mes_raw)
         _validate_month(mes_clean, dataset, ref, "mes", mes_raw)
+        planta_clean = _standardize_plant(planta_raw)
+        if planta_clean is None:
+            vlog.register_failure(
+                stage=_STAGE, dataset=dataset, source_ref=ref,
+                field="planta", value=planta_raw,
+                rule="planta no reconocida entre las cuatro plantas esperadas",
+            )
 
         # Paso 4: convertir numericos
         numeric_values = {}
@@ -411,6 +517,8 @@ def _clean_costos(df: pd.DataFrame) -> pd.DataFrame:
                 numeric_values[field] = parsed
 
         out_rows.append({
+            "planta_original": planta_raw,
+            "planta": planta_clean,
             "mes": mes_clean,
             "energia_clp": numeric_values["energia_clp"],
             "insumos_clp": numeric_values["insumos_clp"],
@@ -424,6 +532,8 @@ def _clean_costos(df: pd.DataFrame) -> pd.DataFrame:
         return result
 
     result["mes"] = result["mes"].astype("string")
+    result["planta_original"] = result["planta_original"].astype("string")
+    result["planta"] = result["planta"].astype("string")
     for f in numeric_fields:
         result[f] = pd.to_numeric(result[f], errors="coerce")
     result["source_file"] = result["source_file"].astype("string")
@@ -439,13 +549,13 @@ def _clean_costos(df: pd.DataFrame) -> pd.DataFrame:
             )
 
     # Detectar duplicados (se mantienen en silver; solo se alerta)
-    dup_cols = ["mes", "energia_clp", "insumos_clp", "mano_obra_clp"]
+    dup_cols = ["planta", "mes", "energia_clp", "insumos_clp", "mano_obra_clp"]
     dup_mask = result.duplicated(subset=dup_cols, keep=False)
     if dup_mask.any():
         for _, row in result[dup_mask].iterrows():
             vlog.register_failure(
                 stage=_STAGE, dataset=dataset, source_ref=row["source_row_index"],
-                field="(mes,energia_clp,insumos_clp,mano_obra_clp)",
+                field="(planta,mes,energia_clp,insumos_clp,mano_obra_clp)",
                 value=str(row[dup_cols].to_dict()),
                 rule="fila duplicada detectada; se mantiene en silver para revision del autor",
             )
@@ -458,11 +568,11 @@ def _clean_lotes(df: pd.DataFrame) -> pd.DataFrame:
     Limpia y valida bronze_lotes -> produce silver_lotes.
 
     Pasos:
-      1. Estandarizar 'mes' de numero entero ("1"-"12") a "YYYY-MM" canonico.
+      1. Estandarizar 'fecha' y derivar 'mes' desde ella; conservar ambos originales.
       2. Convertir toneladas_tratadas a float (punto-miles / coma-decimal).
-      3. Convertir ley_pct y recuperacion_pct a float; validar como porcentaje (0-100).
-      4. Validar rangos plausibles de todos los campos numericos.
-      5. Detectar filas duplicadas (se mantienen en silver; solo se alerta).
+      3. Convertir ley_pct y recuperacion_pct a float.
+      4. Marcar elegibilidad con las reglas acordadas, sin eliminar registros.
+      5. Detectar lote_id repetidos (se mantienen en silver; solo se alerta).
 
     No hay cabeceras repetidas en bronze_lotes (la fuente es SQLite).
     """
@@ -472,30 +582,65 @@ def _clean_lotes(df: pd.DataFrame) -> pd.DataFrame:
     for _, row in df.iterrows():
         ref = row["source_row_index"]
 
-        # Paso 1: estandarizar mes
+        # Paso 1: estandarizar la fecha operacional y derivar el mes oficial
+        fecha_raw = str(row["fecha"]).strip()
+        fecha_clean = _standardize_operational_date(fecha_raw)
+        mes_clean = fecha_clean[:7] if fecha_clean is not None else None
         mes_raw = str(row["mes"]).strip()
-        mes_clean = _standardize_month_from_int(mes_raw)
-        _validate_month(mes_clean, dataset, ref, "mes", mes_raw)
+        mes_original_comparable = (
+            f"{ANALYSIS_YEAR}-{int(mes_raw):02d}"
+            if mes_raw.isdigit() and 1 <= int(mes_raw) <= 12
+            else None
+        )
+        if fecha_clean is None:
+            vlog.register_failure(
+                stage=_STAGE, dataset=dataset, source_ref=ref,
+                field="fecha", value=fecha_raw,
+                rule="fecha operacional no interpretable en los formatos observados",
+            )
+        if mes_clean != mes_original_comparable:
+            vlog.register_failure(
+                stage=_STAGE, dataset=dataset, source_ref=ref,
+                field="mes", value=mes_raw,
+                rule=(
+                    f"mes original discrepa del mes derivado de fecha ({mes_clean}); "
+                    "se usa la fecha operacional"
+                ),
+            )
 
         # Paso 2: convertir toneladas
         ton_raw = str(row["toneladas_tratadas"]).strip()
         ton = _parse_numeric_lotes(ton_raw, "toneladas_tratadas")
-        _validate_numeric(ton, "toneladas_tratadas", dataset, ref, ton_raw)
 
         # Paso 3: convertir y validar porcentajes
         ley_raw = str(row["ley_pct"]).strip()
         ley = _parse_numeric_lotes(ley_raw, "ley_pct")
-        _validate_percentage(ley, "ley_pct", dataset, ref, ley_raw)
 
         rec_raw = str(row["recuperacion_pct"]).strip()
         rec = _parse_numeric_lotes(rec_raw, "recuperacion_pct")
-        _validate_percentage(rec, "recuperacion_pct", dataset, ref, rec_raw)
+
+        # Paso 4: marcar elegibilidad sin descartar la fila de silver
+        causas = evaluar_elegibilidad_lote(fecha_clean, ton, ley, rec)
+        for causa in causas:
+            vlog.register_failure(
+                stage=_STAGE, dataset=dataset, source_ref=ref,
+                field="elegibilidad", value=str(row["lote_id"]),
+                rule=f"lote excluido del calculo principal: {causa}",
+            )
 
         out_rows.append({
+            "lote_id": _parse_integer(row["lote_id"]),
+            "fecha_original": fecha_raw,
+            "fecha": fecha_clean,
+            "planta_id": _parse_integer(row["planta_id"]),
+            "rajo_id": _parse_integer(row["rajo_id"]),
+            "mes_original": mes_raw,
             "mes": mes_clean,
             "toneladas_tratadas": ton,
             "ley_pct": ley,
             "recuperacion_pct": rec,
+            "es_elegible": not causas,
+            "motivo_exclusion": "|".join(causas),
             "source_file": row["source_file"],
             "source_row_index": ref,
         })
@@ -504,56 +649,130 @@ def _clean_lotes(df: pd.DataFrame) -> pd.DataFrame:
     if result.empty:
         return result
 
-    result["mes"] = result["mes"].astype("string")
+    for field in ["lote_id", "planta_id", "rajo_id"]:
+        result[field] = pd.array(result[field], dtype="Int64")
+    for field in ["fecha_original", "fecha", "mes_original", "mes", "motivo_exclusion"]:
+        result[field] = result[field].astype("string")
     result["toneladas_tratadas"] = pd.to_numeric(result["toneladas_tratadas"], errors="coerce")
     result["ley_pct"] = pd.to_numeric(result["ley_pct"], errors="coerce")
     result["recuperacion_pct"] = pd.to_numeric(result["recuperacion_pct"], errors="coerce")
+    result["es_elegible"] = result["es_elegible"].astype(bool)
     result["source_file"] = result["source_file"].astype("string")
     result["source_row_index"] = result["source_row_index"].astype("string")
 
-    # Detectar duplicados
-    dup_cols = ["mes", "toneladas_tratadas", "ley_pct", "recuperacion_pct"]
-    dup_mask = result.duplicated(subset=dup_cols, keep=False)
-    if dup_mask.any():
-        for _, row in result[dup_mask].iterrows():
+    # Paso 5: alertar una vez por cada identificador repetido, sin eliminarlo
+    repeated = result[result["lote_id"].duplicated(keep=False)].groupby("lote_id")
+    for lote_id, group in repeated:
+        vlog.register_failure(
+            stage=_STAGE, dataset=dataset,
+            source_ref=",".join(group["source_row_index"].astype(str)),
+            field="lote_id", value=lote_id,
+            rule="identificador repetido; se conservan todas las ocurrencias sin asumir error",
+        )
+
+    return result
+
+
+def _clean_laboratorio(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normaliza bronze_leyes_laboratorio -> produce silver_laboratorio.
+
+    Conserva ley_lab_prom como valor reportado y normaliza sus comas decimales.
+    Las muestras se guardan nuevamente como JSON con leyes numericas, sin usar
+    su promedio para reemplazar ley_lab_prom.
+    """
+    dataset = "bronze_leyes_laboratorio"
+    out_rows = []
+
+    for _, row in df.iterrows():
+        ref = row["source_row_index"]
+        fecha_raw = str(row["fecha_muestreo"]).strip()
+        fecha_clean = _standardize_operational_date(fecha_raw)
+        ley_raw = str(row["ley_lab_prom"]).strip()
+        ley = _parse_numeric_lotes(ley_raw, "ley_lab_prom")
+
+        try:
+            muestras = json.loads(str(row["muestras_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            muestras = []
             vlog.register_failure(
-                stage=_STAGE, dataset=dataset, source_ref=row["source_row_index"],
-                field="(mes,toneladas_tratadas,ley_pct,recuperacion_pct)",
-                value=str(row[dup_cols].to_dict()),
-                rule="fila duplicada detectada; se mantiene en silver para revision del autor",
+                stage=_STAGE, dataset=dataset, source_ref=ref,
+                field="muestras_json", value=row["muestras_json"],
+                rule="lista de muestras no interpretable; se conserva como lista vacia",
             )
 
+        muestras_normalizadas = [
+            {
+                "m": _parse_integer(muestra.get("m")),
+                "ley": _parse_numeric_lotes(muestra.get("ley", ""), "ley_lab"),
+            }
+            for muestra in muestras
+        ]
+
+        if fecha_clean is None:
+            vlog.register_failure(
+                stage=_STAGE, dataset=dataset, source_ref=ref,
+                field="fecha_muestreo", value=fecha_raw,
+                rule="fecha de muestreo no interpretable",
+            )
+        if ley is None:
+            vlog.register_failure(
+                stage=_STAGE, dataset=dataset, source_ref=ref,
+                field="ley_lab_prom", value=ley_raw,
+                rule="ley reportada no interpretable; no se reemplaza por el promedio de muestras",
+            )
+
+        out_rows.append({
+            "lote_id": _parse_integer(row["lote_id"]),
+            "laboratorio": str(row["laboratorio"]).strip(),
+            "fecha_muestreo_original": fecha_raw,
+            "fecha_muestreo": fecha_clean,
+            "ley_lab_prom_original": ley_raw,
+            "ley_lab_prom": ley,
+            "muestras_json": json.dumps(
+                muestras_normalizadas, ensure_ascii=False, separators=(",", ":")
+            ),
+            "cantidad_muestras": len(muestras_normalizadas),
+            "source_file": row["source_file"],
+            "source_row_index": ref,
+        })
+
+    result = pd.DataFrame(out_rows)
+    if result.empty:
+        return result
+
+    result["lote_id"] = pd.array(result["lote_id"], dtype="Int64")
+    result["ley_lab_prom"] = pd.to_numeric(result["ley_lab_prom"], errors="coerce")
+    result["cantidad_muestras"] = pd.array(result["cantidad_muestras"], dtype="Int64")
+    for field in [
+        "laboratorio", "fecha_muestreo_original", "fecha_muestreo",
+        "ley_lab_prom_original", "muestras_json", "source_file", "source_row_index",
+    ]:
+        result[field] = result[field].astype("string")
     return result
 
 
 def _check_last_day_of_month(df: pd.DataFrame, dataset: str, value_field: str) -> None:
     """
-    Verifica que la serie de precios tenga cotizacion en el ultimo dia calendario
-    de cada mes de ANALYSIS_YEAR.
+    Verifica que la serie tenga al menos una cotizacion disponible en cada mes
+    de ANALYSIS_YEAR.
 
-    Si un mes no tiene cotizacion en su ultimo dia, se registra una alerta.
-    No se imputa ningun valor (REGLA 4 en business_rules.py).
-
-    Esta comprobacion es necesaria porque la etapa de metricas usara el precio
-    del ultimo dia del mes; la ausencia del dato dejara ese mes sin metricas.
+    La etapa de metricas selecciona luego la fecha maxima disponible, que
+    corresponde al ultimo dia habil informado por la serie. No se exige una
+    cotizacion en fines de semana o feriados.
     """
     fechas_dt = pd.to_datetime(df["fecha"].dropna().values, format="%Y-%m-%d", errors="coerce")
-    fechas_set = set(pd.Series(fechas_dt).dropna().dt.strftime("%Y-%m-%d"))
+    meses_presentes = set(pd.Series(fechas_dt).dropna().dt.strftime("%Y-%m"))
 
     for month in range(1, 13):
-        last_day = (
-            pd.Timestamp(year=ANALYSIS_YEAR, month=month, day=1) + pd.offsets.MonthEnd(0)
-        )
-        last_day_str = last_day.strftime("%Y-%m-%d")
         mes_str = f"{ANALYSIS_YEAR}-{month:02d}"
-        if last_day_str not in fechas_set:
+        if mes_str not in meses_presentes:
             vlog.register_failure(
                 stage=_STAGE, dataset=dataset, source_ref="serie_completa",
-                field="fecha", value=last_day_str,
+                field="fecha", value=mes_str,
                 rule=(
-                    f"no existe cotizacion de '{value_field}' para el ultimo dia "
-                    f"del mes {mes_str} ({last_day_str}); "
-                    "la etapa de metricas no podra calcular ese mes (REGLA 4)"
+                    f"no existe ninguna cotizacion de '{value_field}' para {mes_str}; "
+                    "las metricas dependientes quedaran vacias (REGLA 4)"
                 ),
             )
 
@@ -668,7 +887,19 @@ def run_cleaning() -> None:
     )
 
     # ------------------------------------------------------------------
-    # 3. PRECIO COBRE
+    # 3. LEYES DE LABORATORIO
+    # ------------------------------------------------------------------
+    print("[cleaning] Procesando bronze_leyes_laboratorio...")
+    df_lab_bronze = pd.read_parquet(BRONZE_DIR / "bronze_leyes_laboratorio.parquet")
+    df_lab_silver = _clean_laboratorio(df_lab_bronze)
+    df_lab_silver.to_parquet(SILVER_DIR / "silver_laboratorio.parquet", index=False)
+    print(
+        f"[cleaning] silver_laboratorio: {len(df_lab_bronze)} filas bronze -> "
+        f"{len(df_lab_silver)} filas silver"
+    )
+
+    # ------------------------------------------------------------------
+    # 4. PRECIO COBRE
     # ------------------------------------------------------------------
     print("[cleaning] Procesando bronze_precio_cobre...")
     df_pc_bronze = pd.read_parquet(BRONZE_DIR / "bronze_precio_cobre.parquet")
@@ -680,7 +911,7 @@ def run_cleaning() -> None:
     )
 
     # ------------------------------------------------------------------
-    # 4. TIPO DE CAMBIO
+    # 5. TIPO DE CAMBIO
     # ------------------------------------------------------------------
     print("[cleaning] Procesando bronze_tipo_cambio...")
     df_tc_bronze = pd.read_parquet(BRONZE_DIR / "bronze_tipo_cambio.parquet")
