@@ -8,7 +8,7 @@ Pipeline de datos reproducible para la extracción, limpieza, validación y cál
 
 El objetivo analítico central del proyecto es responder una pregunta estratégica planteada por el directorio y la gerencia de CuprumAndes:
 
-> **¿El cash cost por libra de cobre subió o bajó durante 2025, y el resultado financiero positivo del ejercicio se debió a un precio del cobre favorable en el mercado o a una reducción real en los costos de producción (producir más barato)?**
+> **¿El cash cost por libra de cobre subió o bajó durante 2025, y cómo se compara el efecto del precio de referencia del cobre frente a la evolución del costo directo de producción?**
 
 Para resolver esta interrogante, el pipeline integra cuatro fuentes de datos dispersas:
 1. Base operacional SQLite (`origen_mina.sqlite`), que contiene los lotes de producción diaria de mineral.
@@ -22,7 +22,7 @@ El pipeline procesa estas fuentes a través de una arquitectura Medallion (`raw`
 
 ## 2. Prerrequisitos
 
-- **Versión de Python probada:** Python **3.12** (específicamente probado y validado sobre Python 3.12.3 en Linux / WSL2 Ubuntu, compatible también con macOS y Windows).
+- **Entorno probado:** Python **3.12.13** en **Windows con PowerShell**. Las instrucciones para Linux, macOS y WSL se mantienen como guía de instalación, pero no fueron verificadas en esta revisión.
 - **Acceso a Internet:** Se requiere conexión a Internet **únicamente durante la primera ejecución**. En dicha corrida, la etapa de extracción descarga las series del año 2025 desde la API de `mindicador.cl` (`precio_cobre_2025.json` y `tipo_cambio_2025.json`) y las persiste en la carpeta `raw/`. Todas las ejecuciones subsecuentes pueden realizarse de forma 100% offline.
 
 ---
@@ -80,6 +80,30 @@ python main.py
 
 Durante la ejecución, el script mostrará en consola el avance de cada una de las tres etapas (`[1/3]`, `[2/3]`, `[3/3]`) y concluirá desplegando un resumen de las validaciones registradas.
 
+### Verificación y resultados esperados
+
+Después de ejecutar `python main.py`, la consistencia del pipeline se comprueba con:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+La ejecución validada finalizó satisfactoriamente con **14 pruebas aprobadas** (`Ran 14 tests ... OK`). Sus controles principales son:
+
+- 14.598 registros operacionales originales.
+- 358 registros no elegibles para el indicador principal: 86 fechados en 2026 y 272 adicionales por calidad.
+- 14.240 registros elegibles, conservando los identificadores repetidos según la decisión del equipo.
+- 843 análisis de laboratorio vinculables a los registros elegibles.
+- 12 meses de producción en Gold; ocho con cash cost calculable y cuatro con costos incompletos.
+
+El cash cost de referencia pasa de aproximadamente **1,85 USD/lb en enero a 3,41 USD/lb en diciembre de 2025**, un incremento de **84,7 %**.
+
+La corrida revisada generó 1.517 eventos en `validation_log.parquet`. Estos eventos incluyen alertas de calidad, excepciones de negocio y exclusiones documentadas; no son necesariamente errores de ejecución ni equivalen al número de registros excluidos.
+
+El CSV de costos contiene 47 filas extraídas. Una corresponde a una cabecera repetida y otra a una fila de resumen, por lo que Silver conserva 45 registros útiles.
+
+**Tiempo medido del pipeline:** 1,584 segundos para `python main.py` en Windows PowerShell con Python 3.12.13 y las respuestas de la API ya disponibles localmente. Esta medición no incluye la creación del entorno, la instalación de dependencias ni la descarga inicial.
+
 ---
 
 ## 5. Estructura de carpetas y arquitectura de datos
@@ -91,13 +115,11 @@ Proyecto-TIN-G6/
 ├── main.py                    # Punto de entrada único del pipeline
 ├── requirements.txt           # Dependencias fijadas (pandas y pyarrow)
 ├── README.md                  # Este archivo de instrucciones y documentación
-├── ARCHITECTURE.md            # Documentación técnica de arquitectura y decisiones
-├── PROJECT_DESCRIPTION.md     # Descripción del problema, alcance y objetivos
 ├── PROJECT_STRUCTURE.md       # Mapa detallado de navegación del repositorio
 ├── BRONZE_SCHEMA.md           # Especificación de esquema y trazabilidad de bronze
 ├── SILVER_SCHEMA.md           # Especificación de esquema y formatos de silver
 ├── GOLD_SCHEMA.md             # Especificación de columnas y fórmulas de gold
-├── validation_log.parquet     # Archivo persistente con el registro de todas las fallas
+├── validation_log.parquet     # Archivo persistente con las alertas de validación
 │
 ├── raw/                       # Capa Cruda: fuentes originales (inmutables) + JSON de API
 │   ├── origen_mina.sqlite
@@ -126,13 +148,16 @@ Proyecto-TIN-G6/
 │   ├── gold_sensibilidad_lotes_repetidos.parquet
 │   └── revision_lotes_2026_laboratorio.parquet
 │
-└── code/                      # Módulos de lógica del pipeline
-    ├── config.py              # Rutas a directorios y constantes analíticas compartidas
-    ├── business_rules.py      # Declaración de reglas de negocio y rangos de validez
-    ├── validation_log.py      # Acumulación en memoria y exportación del log de validaciones
-    ├── extraction.py          # Etapa 1: Extracción hacia bronze/
-    ├── cleaning.py            # Etapa 2: Limpieza y validación hacia silver/
-    └── metrics.py             # Etapa 3: Cálculo de métricas analíticas hacia gold/
+├── code/                      # Módulos de lógica del pipeline
+│   ├── config.py              # Rutas a directorios y constantes analíticas compartidas
+│   ├── business_rules.py      # Declaración de reglas de negocio y rangos de validez
+│   ├── validation_log.py      # Acumulación en memoria y exportación del log de validaciones
+│   ├── extraction.py          # Etapa 1: Extracción hacia bronze/
+│   ├── cleaning.py            # Etapa 2: Limpieza y validación hacia silver/
+│   └── metrics.py             # Etapa 3: Cálculo de métricas analíticas hacia gold/
+│
+└── tests/
+    └── test_pipeline.py       # Pruebas unitarias y controles de conciliación
 ```
 
 ---
@@ -231,8 +256,9 @@ Las reglas analíticas están centralizadas en `code/business_rules.py`:
    - Conversión a USD con el dólar de cierre:
      $$\text{costos\_totales\_usd} = \frac{\text{costos\_totales\_clp}}{\text{tipo\_cambio\_clp\_usd}}$$
    - *Tratamiento de costos faltantes:* Deben estar las cuatro plantas y sus tres componentes. Si falta una planta o un componente (por ejemplo, `N/A` en insumos de Cerro Norte en junio), **no se imputa con cero** y el mes queda sin métricas económicas dependientes.
-5. **Ingresos en USD:**
+5. **Valorización de referencia (`ingresos_usd`):**
    $$\text{ingresos\_usd} = \text{cobre\_fino\_lb} \times \text{precio\_cobre\_usd\_lb}$$
+   Representa una valorización de la producción al precio de mercado de referencia; no corresponde a ventas observadas.
 6. **Cash Cost (USD/lb):**
    $$\text{cash\_cost\_usd\_lb} = \frac{\text{costos\_totales\_usd}}{\text{cobre\_fino\_lb}}$$
    Representa el costo operacional unitario por libra producida. Si los costos totales son `NaN`, el cash cost queda como `NaN`.
@@ -246,7 +272,7 @@ Las reglas analíticas están centralizadas en `code/business_rules.py`:
 | `mes` | string | `YYYY-MM` | Mes del año 2025 (`2025-01` a `2025-12`) |
 | `cobre_fino_lb` | float64 | Libras (lb) | Producción total de cobre fino en libras |
 | `precio_cobre_usd_lb` | float64 | USD/lb | Precio del cobre al cierre del mes |
-| `ingresos_usd` | float64 | USD | Ingresos operacionales por venta |
+| `ingresos_usd` | float64 | USD | Valorización de referencia a precio de mercado; no corresponde a ventas observadas |
 | `costos_totales_usd` | float64 | USD | Costos operacionales totales en USD (`NaN` en marzo, junio, agosto y noviembre) |
 | `cash_cost_usd_lb` | float64 | USD/lb | Costo operacional por libra producida (`NaN` en esos cuatro meses) |
 | `utilidades_usd` | float64 | USD | Margen directo de referencia (`NaN` en esos cuatro meses) |
@@ -255,7 +281,7 @@ Las reglas analíticas están centralizadas en `code/business_rules.py`:
 
 ## 8. Lectura del log de validaciones y resumen en pantalla
 
-El pipeline está diseñado bajo el principio de que **las fallas de calidad de datos nunca detienen la ejecución**, sino que se capturan de forma no invasiva en un registro unificado para su posterior auditoría.
+El pipeline está diseñado bajo el principio de que **las alertas de calidad de datos no detienen la ejecución**, sino que se capturan de forma no invasiva en un registro unificado para su posterior auditoría. Un mismo registro puede generar más de un evento, por lo que el total del log no equivale al número de filas excluidas ni indica que la ejecución haya fallado.
 
 ### Resumen en pantalla
 Al terminar de ejecutar `main.py`, se despliega en la terminal un resumen estructurado:
@@ -347,6 +373,8 @@ La corrida vigente conserva los 14.598 lotes originales. La fecha normalizada id
 
 De los 879 análisis de laboratorio, 843 se vinculan a lotes elegibles de 2025 (aproximadamente 5,9 %). La alternativa mensual calcula `f = Σ(T × ley_lab_prom) / Σ(T × ley_operacional)` y aplica ese factor al cobre fino principal, sin cambiar la definición oficial de Gold.
 
+Los 86 lotes fechados en 2026 se conservan para revisión contra laboratorio en un resultado separado. Esa revisión no corrige sus fechas ni los reincorpora automáticamente al cálculo principal.
+
 Los resultados conciliados son: cash cost enero `1,845768 USD/lb`, diciembre `3,408989 USD/lb`, variación `+84,692 %`, cash cost ponderado de los ocho meses completos `2,340304 USD/lb`, margen de referencia `2,233095 USD/lb` en S1 y `2,125960 USD/lb` en S2, efecto precio `+0,598223 USD/lb` y efecto costo `-0,705358 USD/lb`.
 
 Las pruebas se ejecutan con:
@@ -354,3 +382,5 @@ Las pruebas se ejecutan con:
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+La ejecución revisada terminó satisfactoriamente con 14 pruebas aprobadas.

@@ -11,12 +11,9 @@ mueva o elimine un archivo relevante.
 /
 ├── main.py                    # Punto de entrada único del pipeline
 ├── requirements.txt           # Dependencias de terceros con versiones exactas
-├── PROJECT_DESCRIPTION.md     # Descripción del problema, alcance y criterios de éxito
-├── ARCHITECTURE.md            # Arquitectura técnica, decisiones y componentes
 ├── PROJECT_STRUCTURE.md       # Este archivo — mapa de navegación del repositorio
 ├── README.md                  # Instrucciones de instalación y ejecución para terceros
 ├── Enunciado.md               # Enunciado académico original (referencia, no modificar)
-├── A1_extraccion (1).ipynb    # Notebook de exploración (referencia, no es el pipeline)
 ├── .gitignore
 │
 ├── raw/                       # Fuentes originales — NO MODIFICAR

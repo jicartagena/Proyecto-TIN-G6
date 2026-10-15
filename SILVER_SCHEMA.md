@@ -155,7 +155,7 @@ de limpieza (`code/cleaning.py`) en la carpeta `silver/`.
 | Dataset                   | Razon                                                                      |
 |---------------------------|----------------------------------------------------------------------------|
 | Metricas derivadas        | Cobre fino, cash cost, ingresos, costos en USD: se calculan en la etapa de metricas desde silver. |
-| Dimension de tiempo       | Eliminada del modelo dimensional (ARCHITECTURE.md, decision 11).           |
+| Dimension de tiempo       | No se materializa; el mes se conserva directamente como atributo.         |
 | Dimension fisica de planta| No se crea una tabla dimensional; la planta queda como atributo del dato de origen. |
 
 ---

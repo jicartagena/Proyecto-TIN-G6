@@ -12,8 +12,8 @@ en la carpeta `gold/`.
   limpios sin transformar. Toda columna es un resultado calculado a partir
   de silver, salvo `mes` que es la clave de agregación.
 - **Grano mensual a nivel empresa:** una fila por mes de 2025. No hay
-  desglose por planta ni por rajo (decisión de diseño documentada en
-  ARCHITECTURE.md, decisiones 11 y 19).
+  desglose por planta ni por rajo; esta decisión se documenta en los
+  principios y fórmulas del presente esquema.
 - **Granos de origen conservados en Silver:** costos planta-mes y operación
   lote-planta-rajo están disponibles antes de la consolidación empresa-mes.
 - **Sin dimensiones:** no existe `dim_planta` ni `dim_tiempo`; el mes se
@@ -90,15 +90,18 @@ alerta (REGLA 4 de `business_rules.py`).
 El **tipo de cambio USD-CLP** (dólar observado) se obtiene con el mismo
 criterio — último día hábil del mes — desde `silver/silver_tipo_cambio.parquet`.
 Se usa internamente para convertir costos de CLP a USD; no aparece como
-columna en gold (ARCHITECTURE.md, decisión 19).
+columna en gold.
 
 ---
 
-### Fórmula C — Ingresos (USD)
+### Fórmula C — Valorización de referencia (USD)
 
 ```
 ingresos_usd = cobre_fino_lb × precio_cobre_usd_lb
 ```
+
+El nombre de la columna se conserva por compatibilidad, pero el valor no
+corresponde a ventas observadas ni a ingresos contables.
 
 **Fuentes:** Fórmulas A y B.
 
