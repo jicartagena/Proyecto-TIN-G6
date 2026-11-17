@@ -105,10 +105,15 @@ de limpieza (`code/cleaning.py`) en la carpeta `silver/`.
 | `fecha_muestreo_original` | string | Fecha original. |
 | `fecha_muestreo` | string | Fecha normalizada `YYYY-MM-DD`. |
 | `ley_lab_prom_original` | string | Valor reportado original. |
-| `ley_lab_prom` | float64 | El mismo valor normalizado; no se reemplaza por el promedio de muestras. |
+| `ley_lab_prom` | float64 | El mismo valor normalizado como decimal porcentual; el punto nunca se trata como separador de miles y no se reemplaza por el promedio de muestras. |
 | `muestras_json` | string | Muestras con leyes numericas normalizadas. |
 | `cantidad_muestras` | Int64 | Cantidad de muestras informadas. |
 | `source_file`, `source_row_index` | string | Trazabilidad al JSON original. |
+
+El control de E2 exige `0 < ley_lab_prom < 5` en los pares vinculables. La
+corrección del parser reparó 84 casos vinculables en que valores originales como
+`1.116` se habían interpretado como `1116`. Tras regenerar Silver, los 843
+análisis vinculables quedan en rango.
 
 ---
 

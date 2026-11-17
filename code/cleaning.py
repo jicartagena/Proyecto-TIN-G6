@@ -134,7 +134,8 @@ def _parse_numeric_lotes(raw: str, field: str):
         dataset son todos < 2 %Cu; un valor de 1000+ seria imposible.
         Excepcion: si hay coma en el mismo string, la coma es decimal y el punto
         seria miles, pero eso no ocurre en ley_pct en este dataset.
-      - recuperacion_pct: igual que ley_pct; los valores son 85-115, nunca miles.
+      - recuperacion_pct y ley_lab_prom: igual que ley_pct; el punto es decimal,
+        nunca separador de miles.
       - Cualquier otro campo: heuristica generica (parte entera != "0" y 3 digitos
         exactos tras el punto -> miles).
 
@@ -159,7 +160,7 @@ def _parse_numeric_lotes(raw: str, field: str):
             if field == "toneladas_tratadas" and parts[0] != "0":
                 # Toneladas: parte entera >= 1 y 3 digitos -> miles (2.834 = 2834)
                 s = s.replace(".", "")
-            elif field in ("ley_pct", "recuperacion_pct"):
+            elif field in ("ley_pct", "recuperacion_pct", "ley_lab_prom"):
                 # Leyes y recuperacion: NUNCA son miles; el punto es siempre decimal
                 pass  # dejar s sin cambio -> float(s) lo interpreta como decimal
             else:
@@ -721,6 +722,8 @@ def _clean_laboratorio(df: pd.DataFrame) -> pd.DataFrame:
                 field="ley_lab_prom", value=ley_raw,
                 rule="ley reportada no interpretable; no se reemplaza por el promedio de muestras",
             )
+        else:
+            _validate_numeric(ley, "ley_lab_prom", dataset, ref, ley_raw)
 
         out_rows.append({
             "lote_id": _parse_integer(row["lote_id"]),

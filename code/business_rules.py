@@ -113,6 +113,9 @@ VALID_RANGES = {
     # Fuente: experiencia de dominio; ajustar si los datos lo requieren.
     "ley_pct": (0.0, 5.0),
 
+    # Ley de laboratorio en porcentaje (%). Usa la misma escala que ley_pct.
+    "ley_lab_prom": (0.0, 5.0),
+
     # Recuperación metalúrgica en porcentaje (%).
     # Valores fuera de [0, 100] son imposibles; se estrecha el rango inferior.
     "recuperacion_pct": (50.0, 100.0),

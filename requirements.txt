@@ -5,6 +5,9 @@
 # La biblioteca estándar de Python maneja: sqlite3, urllib.request, json,
 # pathlib y csv — no se necesitan paquetes extra para esas tareas.
 #
+# numpy: operaciones vectorizadas usadas directamente por el modelo E2.
+numpy==2.5.4
+
 # pandas: motor principal de procesamiento tabular (lectura, limpieza,
 #         agregación y escritura de Parquet).
 pandas==2.2.3

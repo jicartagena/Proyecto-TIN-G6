@@ -18,6 +18,7 @@ from cleaning import (  # noqa: E402
     _clean_laboratorio,
     _clean_lotes,
     _parse_clp_amount,
+    _parse_numeric_lotes,
     _standardize_operational_date,
     evaluar_elegibilidad_lote,
 )
@@ -115,6 +116,9 @@ class TestTransformaciones(unittest.TestCase):
         cleaned = _clean_laboratorio(frame)
         self.assertAlmostEqual(cleaned.loc[0, "ley_lab_prom"], 0.87)
         self.assertIn('"ley":0.9', cleaned.loc[0, "muestras_json"])
+
+    def test_laboratorio_con_punto_decimal_no_se_convierte_en_miles(self) -> None:
+        self.assertAlmostEqual(_parse_numeric_lotes("1.116", "ley_lab_prom"), 1.116)
 
     def test_formula_de_calibracion(self) -> None:
         lots = pd.DataFrame(

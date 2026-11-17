@@ -1,3 +1,10 @@
+<!-- E2-B-CADENA-PLANTA-MES -->
+> **Aviso de vigencia E2:** el esquema empresa-mes de 12 filas descrito más abajo
+> se conserva como referencia de conciliación de E1. E2 publica
+> `fact_planta_mes.parquet` (48 filas), `dim_planta.parquet` (4) y
+> `dim_tiempo.parquet` (12) en `gold/e2/`. El KPI y su historia se derivan con
+> `code/e2_semantic.py`. Ver `docs/ARQUITECTURA_E2_B.md`.
+
 # Esquema de la Capa Gold — CuprumAndes SpA
 
 Este documento describe el esquema, las fórmulas y las decisiones de diseño

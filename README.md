@@ -1,3 +1,13 @@
+<!-- E2-B-CADENA-PLANTA-MES -->
+> **E2 / Arquitectura y modelo vigente (17-11-2026).** La cadena actual se ejecuta con
+> `python run_e2.py` y publica los tres Parquet del modelo estrella planta-mes
+> en `gold/e2/`. El indicador y su historia se calculan con las funciones de
+> `code/e2_semantic.py`. Los controles se guardan en `reporte_calidad.csv`.
+> La última corrida
+> verificada produjo 48 filas, 44 completas, 16 controles `PASA`, 2 `AVISA` y 0 bloqueos.
+> `python main.py` y `gold_metricas.parquet` se conservan como cálculo E1 conciliado.
+> Ver `README_E2_B.md` y `docs/ARQUITECTURA_E2_B.md`.
+
 # CuprumAndes — Pipeline de Procesamiento de Datos (Proyecto TIN G6)
 
 Pipeline de datos reproducible para la extracción, limpieza, validación y cálculo de métricas operacionales y financieras de la minera de cobre **CuprumAndes SpA** para el ejercicio 2025.
@@ -66,19 +76,25 @@ Instale las dependencias exactas indicadas en `requirements.txt`:
 pip install -r requirements.txt
 ```
 
-> **Nota sobre dependencias:** El proyecto sigue el principio de dependencias mínimas de terceros. Solo instala `pandas==2.2.3` y `pyarrow==17.0.0` para el procesamiento tabular y la lectura/escritura de archivos Parquet. Las demás funcionalidades (conexión SQLite, peticiones HTTP, parseo JSON/CSV y rutas) utilizan la biblioteca estándar de Python (`sqlite3`, `urllib.request`, `json`, `csv`, `pathlib`).
+> **Nota sobre dependencias:** El proyecto instala `numpy==2.5.4`, `pandas==2.2.3` y `pyarrow==17.0.0` para operaciones vectorizadas, procesamiento tabular y archivos Parquet. Las demás funcionalidades (conexión SQLite, peticiones HTTP, parseo JSON/CSV y rutas) utilizan la biblioteca estándar de Python (`sqlite3`, `urllib.request`, `json`, `csv`, `pathlib`).
 
 ---
 
 ## 4. Ejecución del pipeline
 
-Para ejecutar el pipeline completo de punta a punta (las tres etapas en secuencia más la generación del log de validaciones), ejecute un único comando desde la raíz del proyecto:
+Para ejecutar la cadena E2 vigente de punta a punta —incluida la publicación versionada y sus controles— use:
+
+```bash
+python run_e2.py
+```
+
+Para reproducir únicamente la salida histórica E1 (las tres etapas y el log de validaciones), use:
 
 ```bash
 python main.py
 ```
 
-Durante la ejecución, el script mostrará en consola el avance de cada una de las tres etapas (`[1/3]`, `[2/3]`, `[3/3]`) y concluirá desplegando un resumen de las validaciones registradas.
+`run_e2.py` muestra cuatro etapas y actualiza `gold/e2/` después de aprobar los controles bloqueantes. `main.py` muestra las tres etapas históricas (`[1/3]`, `[2/3]`, `[3/3]`).
 
 ### Verificación y resultados esperados
 
@@ -88,7 +104,7 @@ Después de ejecutar `python main.py`, la consistencia del pipeline se comprueba
 python -m unittest discover -s tests -v
 ```
 
-La ejecución validada finalizó satisfactoriamente con **14 pruebas aprobadas** (`Ran 14 tests ... OK`). Sus controles principales son:
+La ejecución validada finalizó satisfactoriamente con **22 pruebas aprobadas**: 15 del pipeline base y 7 de E2. Sus controles principales son:
 
 - 14.598 registros operacionales originales.
 - 358 registros no elegibles para el indicador principal: 86 fechados en 2026 y 272 adicionales por calidad.
@@ -102,7 +118,7 @@ La corrida revisada generó 1.517 eventos en `validation_log.parquet`. Estos eve
 
 El CSV de costos contiene 47 filas extraídas. Una corresponde a una cabecera repetida y otra a una fila de resumen, por lo que Silver conserva 45 registros útiles.
 
-**Tiempo medido del pipeline:** 1,584 segundos para `python main.py` en Windows PowerShell con Python 3.12.13 y las respuestas de la API ya disponibles localmente. Esta medición no incluye la creación del entorno, la instalación de dependencias ni la descarga inicial.
+**Tiempos medidos.** La revisión E1 y la corrida E2 del 17-11-2026 duraron 1,584 s cada una en Windows PowerShell. Las mediciones comenzaron con el entorno instalado y los snapshots disponibles en disco.
 
 ---
 
@@ -112,7 +128,7 @@ El repositorio implementa una arquitectura por capas Medallion:
 
 ```text
 Proyecto-TIN-G6/
-├── main.py                    # Punto de entrada único del pipeline
+├── main.py                    # Punto de entrada histórico E1
 ├── requirements.txt           # Dependencias fijadas (pandas y pyarrow)
 ├── README.md                  # Este archivo de instrucciones y documentación
 ├── PROJECT_STRUCTURE.md       # Mapa detallado de navegación del repositorio

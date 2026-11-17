@@ -3,3 +3,17 @@
 ARCHITECTURE.md
 PROJECT_DESCRIPTION.md
 .venv/
+__pycache__/
+/reporte_calidad.csv
+/gold/e2/
+/gold/.e2-*/
+/gold/_e2_staging/
+/gold/e2_versions/
+/gold/e2_latest.json
+/gold/controles_calidad_e2.*
+/gold/dim_planta.parquet
+/gold/dim_tiempo.parquet
+/gold/fact_planta_mes.parquet
+/gold/costo_directo_empresa_mes.parquet
+/gold/historia_costo_empresa_mes.parquet
+/gold/validation_log.parquet
